@@ -21,7 +21,7 @@ public class SecurityConfiguration {
   public SecurityFilterChain userSecurityFilterChain(HttpSecurity http, JwtService jwtService, ApiErrorWriter apiErrorWriter)
       throws Exception {
     JwtAuthenticationFilter jwtFilter =
-        new JwtAuthenticationFilter(jwtService, apiErrorWriter, "USER", "/api/user", List.of("/api/user"));
+        new JwtAuthenticationFilter(jwtService, apiErrorWriter, "USER", "/api/user", List.of("/api/user/auth"));
 
     http.securityMatcher("/api/user/**");
     http.csrf(csrf -> csrf.disable());

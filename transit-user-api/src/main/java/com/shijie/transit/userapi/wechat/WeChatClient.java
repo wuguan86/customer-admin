@@ -2,6 +2,7 @@ package com.shijie.transit.userapi.wechat;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.charset.StandardCharsets;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
@@ -16,7 +17,7 @@ public class WeChatClient {
   }
 
   public WeChatAccessTokenResponse exchangeCodeForToken(String appId, String appSecret, String code) {
-    String response = restClient.get()
+    byte[] responseBody = restClient.get()
         .uri(uriBuilder -> uriBuilder
             .scheme("https")
             .host("api.weixin.qq.com")
@@ -27,9 +28,10 @@ public class WeChatClient {
             .queryParam("grant_type", "authorization_code")
             .build())
         .retrieve()
-        .body(String.class);
+        .body(byte[].class);
 
     try {
+      String response = responseBody == null ? "" : new String(responseBody, StandardCharsets.UTF_8);
       return objectMapper.readValue(response, WeChatAccessTokenResponse.class);
     } catch (JsonProcessingException e) {
       throw new RuntimeException("Failed to parse WeChat access token response", e);
@@ -37,7 +39,7 @@ public class WeChatClient {
   }
 
   public WeChatUserInfoResponse fetchUserInfo(String accessToken, String openId) {
-    String response = restClient.get()
+    byte[] responseBody = restClient.get()
         .uri(uriBuilder -> uriBuilder
             .scheme("https")
             .host("api.weixin.qq.com")
@@ -46,9 +48,10 @@ public class WeChatClient {
             .queryParam("openid", openId)
             .build())
         .retrieve()
-        .body(String.class);
+        .body(byte[].class);
 
     try {
+      String response = responseBody == null ? "" : new String(responseBody, StandardCharsets.UTF_8);
       return objectMapper.readValue(response, WeChatUserInfoResponse.class);
     } catch (JsonProcessingException e) {
       throw new RuntimeException("Failed to parse WeChat user info response", e);

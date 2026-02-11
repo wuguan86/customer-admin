@@ -5,7 +5,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @ConfigurationProperties(prefix = "dify")
 public class DifyProperties {
   private String baseUrl;
-  private String apiKey;
+  private String chatApiKey;
+  private String datasetApiKey;
 
   public String getBaseUrl() {
     return baseUrl;
@@ -15,11 +16,19 @@ public class DifyProperties {
     this.baseUrl = baseUrl;
   }
 
-  public String getApiKey() {
-    return apiKey;
+  public String getChatApiKey() {
+    return chatApiKey;
   }
 
-  public void setApiKey(String apiKey) {
-    this.apiKey = apiKey;
+  public void setChatApiKey(String chatApiKey) {
+    this.chatApiKey = chatApiKey;
+  }
+
+  public String getDatasetApiKey() {
+    return datasetApiKey;
+  }
+
+  public void setDatasetApiKey(String datasetApiKey) {
+    this.datasetApiKey = datasetApiKey;
   }
 }

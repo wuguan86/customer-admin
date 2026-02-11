@@ -104,6 +104,9 @@ public class WeChatAuthService {
 
       String nickname = userInfo.getNickname();
       String avatarUrl = userInfo.getHeadImgUrl();
+      if (StringUtils.hasText(avatarUrl) && avatarUrl.startsWith("http://")) {
+        avatarUrl = "https://" + avatarUrl.substring("http://".length());
+      }
       String openId = tokenResp.getOpenId();
       String unionId = StringUtils.hasText(userInfo.getUnionId()) ? userInfo.getUnionId() : tokenResp.getUnionId();
 

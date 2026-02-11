@@ -25,8 +25,17 @@ public class TaskService {
         return taskMapper.selectList(wrapper);
     }
 
+    public TaskEntity getById(Long userId, Long id) {
+        TaskEntity existing = taskMapper.selectById(id);
+        if (existing == null || !existing.getUserId().equals(userId)) {
+            throw new RuntimeException("Task not found or permission denied");
+        }
+        return existing;
+    }
+
     @Transactional
     public TaskEntity create(Long userId, TaskEntity entity) {
+        validateName(entity.getName());
         entity.setUserId(userId);
         entity.setTenantId(TenantContext.getTenantId());
         entity.setStatus("PENDING");
@@ -42,7 +51,10 @@ public class TaskService {
             throw new RuntimeException("Task not found or permission denied");
         }
         // Only allow updating editable fields
-        if (entity.getName() != null) existing.setName(entity.getName());
+        if (entity.getName() != null) {
+            validateName(entity.getName());
+            existing.setName(entity.getName());
+        }
         if (entity.getContent() != null) existing.setContent(entity.getContent());
         if (entity.getStatus() != null) existing.setStatus(entity.getStatus());
         if (entity.getType() != null) existing.setType(entity.getType());
@@ -58,6 +70,20 @@ public class TaskService {
         TaskEntity existing = taskMapper.selectById(id);
         if (existing != null && existing.getUserId().equals(userId)) {
             taskMapper.deleteById(id);
+        }
+    }
+
+    @Transactional
+    public TaskEntity bindKnowledgeBase(Long userId, Long id, String knowledgeBaseId) {
+        TaskEntity existing = getById(userId, id);
+        existing.setKnowledgeBaseId(knowledgeBaseId);
+        taskMapper.updateById(existing);
+        return existing;
+    }
+
+    private void validateName(String name) {
+        if (name != null && name.length() > 15) {
+            throw new IllegalArgumentException("Task name length must be <= 15");
         }
     }
 }
