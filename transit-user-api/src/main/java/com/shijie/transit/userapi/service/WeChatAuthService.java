@@ -4,11 +4,11 @@ import com.shijie.transit.common.security.JwtService;
 import com.shijie.transit.common.security.TransitJwtClaims;
 import com.shijie.transit.common.tenant.TenantContext;
 import com.shijie.transit.common.db.entity.UserAccountEntity;
-import com.shijie.transit.userapi.wechat.WeChatAccessTokenResponse;
 import com.shijie.transit.userapi.wechat.WeChatClient;
 import com.shijie.transit.userapi.wechat.WeChatLoginStateStore;
 import com.shijie.transit.userapi.wechat.WeChatOpenProperties;
-import com.shijie.transit.userapi.wechat.WeChatUserInfoResponse;
+import java.time.Clock;
+import java.time.Instant;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import org.springframework.stereotype.Service;
@@ -21,102 +21,89 @@ public class WeChatAuthService {
   private final WeChatLoginStateStore stateStore;
   private final UserAccountService userAccountService;
   private final JwtService jwtService;
+  private final Clock clock;
+  private volatile MpAccessTokenCache mpAccessTokenCache;
 
   public WeChatAuthService(
       WeChatOpenProperties properties,
       WeChatClient weChatClient,
       WeChatLoginStateStore stateStore,
       UserAccountService userAccountService,
-      JwtService jwtService) {
+      JwtService jwtService,
+      Clock clock) {
     this.properties = properties;
     this.weChatClient = weChatClient;
     this.stateStore = stateStore;
     this.userAccountService = userAccountService;
     this.jwtService = jwtService;
+    this.clock = clock;
   }
 
   public QrCodeResult createQrCode(long tenantId, String redirect) {
     String state = stateStore.createState(tenantId, redirect);
-    String callbackUrlEncoded = URLEncoder.encode(properties.getCallbackUrl(), StandardCharsets.UTF_8);
-    String url = "https://open.weixin.qq.com/connect/oauth2/authorize"
-        + "?appid=" + properties.getAppId()
-        + "&redirect_uri=" + callbackUrlEncoded
-        + "&response_type=code"
-        + "&scope=snsapi_userinfo"
-        + "&state=" + state
-        + "#wechat_redirect";
-    return new QrCodeResult(url, state);
+    if (state.length() > 64) {
+      throw new IllegalStateException("scene too long");
+    }
+
+    String accessToken = getMpAccessToken();
+    WeChatClient.MpQrCodeCreateResult resp = weChatClient.createMpQrCode(accessToken, state, 600);
+    if (resp.errCode() != null && resp.errCode() != 0) {
+      throw new IllegalStateException("wechat mp qrcode failed: errcode=" + resp.errCode() + ", errmsg=" + resp.errMsg());
+    }
+    if (!StringUtils.hasText(resp.ticket())) {
+      throw new IllegalStateException("wechat mp qrcode missing ticket");
+    }
+
+    String ticketEncoded = URLEncoder.encode(resp.ticket(), StandardCharsets.UTF_8);
+    String qrImageUrl = "https://mp.weixin.qq.com/cgi-bin/showqrcode?ticket=" + ticketEncoded;
+    return new QrCodeResult(qrImageUrl, state);
   }
 
-  public CallbackResult handleCallback(String code, String state) {
-    if (!StringUtils.hasText(code) || !StringUtils.hasText(state)) {
-      throw new IllegalArgumentException("code/state required");
+  public void handleScanLogin(String openId, String state) {
+    if (!StringUtils.hasText(openId) || !StringUtils.hasText(state)) {
+      return;
+    }
+    String safeOpenId = openId.trim();
+    String safeState = state.trim();
+
+    WeChatLoginStateStore.Snapshot snapshot = stateStore.snapshot(safeState);
+    if (snapshot.status() == WeChatLoginStateStore.Status.INVALID
+        || snapshot.status() == WeChatLoginStateStore.Status.EXPIRED) {
+      return;
+    }
+    if (snapshot.status() == WeChatLoginStateStore.Status.COMPLETED) {
+      return;
     }
 
-    WeChatLoginStateStore.Snapshot snapshot = stateStore.snapshot(state);
-    if (snapshot.status() == WeChatLoginStateStore.Status.COMPLETED
-        && snapshot.callbackValue() != null
-        && snapshot.stateValue() != null) {
-      return new CallbackResult(
-          snapshot.callbackValue().token(),
-          snapshot.stateValue().redirect(),
-          snapshot.callbackValue().userId(),
-          snapshot.callbackValue().tenantId());
-    }
-    if (snapshot.status() == WeChatLoginStateStore.Status.PROCESSING) {
-      throw new IllegalStateException("login processing");
-    }
-    if (snapshot.status() == WeChatLoginStateStore.Status.FAILED) {
-      throw new IllegalStateException("login failed");
-    }
-    if (snapshot.status() == WeChatLoginStateStore.Status.EXPIRED
-        || snapshot.status() == WeChatLoginStateStore.Status.INVALID) {
-      throw new IllegalArgumentException("state invalid or expired");
-    }
-
-    WeChatLoginStateStore.StateValue stateValue = stateStore.beginCallback(state);
+    WeChatLoginStateStore.StateValue stateValue = stateStore.beginCallback(safeState);
     if (stateValue == null) {
-      throw new IllegalArgumentException("state invalid or expired");
+      return;
     }
 
     TenantContext.setTenantId(stateValue.tenantId());
     try {
-      WeChatAccessTokenResponse tokenResp =
-          weChatClient.exchangeCodeForToken(properties.getAppId(), properties.getAppSecret(), code);
-      if (tokenResp == null) {
-          throw new IllegalStateException("wechat token exchange returned null response");
-      }
-      if (tokenResp.getErrCode() != null && tokenResp.getErrCode() != 0) {
-        throw new IllegalStateException("wechat token exchange failed: errcode=" + tokenResp.getErrCode() + ", errmsg=" + tokenResp.getErrMsg());
-      }
-      if (!StringUtils.hasText(tokenResp.getAccessToken()) || !StringUtils.hasText(tokenResp.getOpenId())) {
-        throw new IllegalStateException("wechat token exchange missing fields");
-      }
+      String mpAccessToken = getMpAccessToken();
+      WeChatClient.MpUserInfoResult userInfo = weChatClient.fetchMpUserInfo(mpAccessToken, safeOpenId);
 
-      WeChatUserInfoResponse userInfo =
-          weChatClient.fetchUserInfo(tokenResp.getAccessToken(), tokenResp.getOpenId());
-      if (userInfo == null) {
-          throw new IllegalStateException("wechat userinfo returned null response");
+      String nickname = null;
+      String avatarUrl = null;
+      String unionId = null;
+      if (userInfo.errCode() == null || userInfo.errCode() == 0) {
+        if (userInfo.subscribe() != null && userInfo.subscribe() == 1) {
+          nickname = userInfo.nickname();
+          avatarUrl = userInfo.avatarUrl();
+          unionId = userInfo.unionId();
+        }
       }
-      if (userInfo.getErrCode() != null && userInfo.getErrCode() != 0) {
-        throw new IllegalStateException("wechat userinfo failed: errcode=" + userInfo.getErrCode() + ", errmsg=" + userInfo.getErrMsg());
-      }
-
-      String nickname = userInfo.getNickname();
-      String avatarUrl = userInfo.getHeadImgUrl();
       if (StringUtils.hasText(avatarUrl) && avatarUrl.startsWith("http://")) {
         avatarUrl = "https://" + avatarUrl.substring("http://".length());
       }
-      String openId = tokenResp.getOpenId();
-      String unionId = StringUtils.hasText(userInfo.getUnionId()) ? userInfo.getUnionId() : tokenResp.getUnionId();
 
-      UserAccountEntity user = userAccountService.upsertByWeChat(openId, unionId, nickname, avatarUrl);
+      UserAccountEntity user = userAccountService.upsertByWeChat(safeOpenId, unionId, nickname, avatarUrl);
       String jwt = jwtService.issueToken(new TransitJwtClaims(user.getId(), stateValue.tenantId(), "USER"));
-      CallbackResult result = new CallbackResult(jwt, stateValue.redirect(), user.getId(), stateValue.tenantId());
-      stateStore.complete(state, new WeChatLoginStateStore.CallbackValue(result.token(), result.userId(), result.tenantId()));
-      return result;
+      stateStore.complete(safeState, new WeChatLoginStateStore.CallbackValue(jwt, user.getId(), stateValue.tenantId()));
     } catch (RuntimeException e) {
-      stateStore.fail(state);
+      stateStore.fail(safeState);
       throw e;
     } finally {
       TenantContext.clear();
@@ -138,9 +125,27 @@ public class WeChatAuthService {
   public record QrCodeResult(String url, String state) {
   }
 
-  public record CallbackResult(String token, String redirect, long userId, long tenantId) {
+  public record LoginPollResult(String status, String token, Long userId, Long tenantId) {
   }
 
-  public record LoginPollResult(String status, String token, Long userId, Long tenantId) {
+  private String getMpAccessToken() {
+    MpAccessTokenCache cache = mpAccessTokenCache;
+    Instant now = Instant.now(clock);
+    if (cache != null && cache.expiresAt().isAfter(now)) {
+      return cache.accessToken();
+    }
+    WeChatClient.MpAccessTokenResult resp = weChatClient.fetchMpAccessToken(properties.getAppId(), properties.getAppSecret());
+    if (resp.errCode() != null && resp.errCode() != 0) {
+      throw new IllegalStateException("wechat mp access_token failed: errcode=" + resp.errCode() + ", errmsg=" + resp.errMsg());
+    }
+    if (!StringUtils.hasText(resp.accessToken()) || resp.expiresInSeconds() <= 0) {
+      throw new IllegalStateException("wechat mp access_token missing fields");
+    }
+    Instant expiresAt = now.plusSeconds(Math.max(0, resp.expiresInSeconds() - 60L));
+    mpAccessTokenCache = new MpAccessTokenCache(resp.accessToken(), expiresAt);
+    return resp.accessToken();
+  }
+
+  private record MpAccessTokenCache(String accessToken, Instant expiresAt) {
   }
 }

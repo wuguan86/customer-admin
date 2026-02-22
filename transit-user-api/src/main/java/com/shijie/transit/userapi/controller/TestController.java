@@ -1,5 +1,6 @@
 package com.shijie.transit.userapi.controller;
 
+import com.shijie.transit.common.web.Result;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -13,7 +14,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 public class TestController {
     @GetMapping("/hello")
-    public String test(){
-        return "hello";
+    public Result<String> test(){
+        return Result.success("hello");
     }
 }

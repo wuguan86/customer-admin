@@ -22,7 +22,7 @@ public class ApiErrorWriter {
     response.setStatus(errorCode.httpStatus());
     response.setCharacterEncoding(StandardCharsets.UTF_8.name());
     response.setContentType(MediaType.APPLICATION_JSON_VALUE);
-    ApiResponse<Void> body = ApiResponse.error(errorCode, message, clock.millis(), null);
+    Result<Void> body = Result.error(errorCode, message, clock.millis(), null);
     response.getWriter().write(objectMapper.writeValueAsString(body));
   }
 }

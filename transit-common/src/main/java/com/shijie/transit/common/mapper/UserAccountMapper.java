@@ -1,4 +1,4 @@
-package com.shijie.transit.userapi.mapper;
+package com.shijie.transit.common.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.shijie.transit.common.db.entity.UserAccountEntity;

@@ -3,7 +3,7 @@ package com.shijie.transit.userapi.service;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.shijie.transit.common.db.entity.UserAccountEntity;
 import com.shijie.transit.common.tenant.TenantContext;
-import com.shijie.transit.userapi.mapper.UserAccountMapper;
+import com.shijie.transit.common.mapper.UserAccountMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;

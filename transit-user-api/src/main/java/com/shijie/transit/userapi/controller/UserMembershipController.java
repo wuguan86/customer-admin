@@ -5,6 +5,7 @@ import com.shijie.transit.common.db.entity.PointsLedgerEntity;
 import com.shijie.transit.common.db.entity.UserMembershipEntity;
 import com.shijie.transit.common.mapper.MembershipPlanMapper;
 import com.shijie.transit.common.security.TransitPrincipal;
+import com.shijie.transit.common.web.Result;
 import com.shijie.transit.userapi.service.MembershipQueryService;
 
 import java.time.LocalDateTime;
@@ -28,27 +29,27 @@ public class UserMembershipController {
   }
 
   @GetMapping("/membership/plans")
-  public List<MembershipPlanEntity> plans() {
-    return membershipQueryService.listEnabledPlans();
+  public Result<List<MembershipPlanEntity>> plans() {
+    return Result.success(membershipQueryService.listEnabledPlans());
   }
 
   @GetMapping("/membership/me")
-  public MyMembershipResponse myMembership() {
+  public Result<MyMembershipResponse> myMembership() {
     TransitPrincipal principal = currentPrincipal();
     UserMembershipEntity membership = membershipQueryService.findActiveMembership(principal.subjectId());
     if (membership == null) {
-      return new MyMembershipResponse(null, null);
+      return Result.success(new MyMembershipResponse(null, null));
     }
     MembershipPlanEntity plan = membership.getPlanId() == null ? null : membershipPlanMapper.selectById(membership.getPlanId());
-    return new MyMembershipResponse(
+    return Result.success(new MyMembershipResponse(
         new MembershipInfo(membership.getStatus(), membership.getStartAt(), membership.getEndAt(), membership.getPointsBalance()),
-        plan);
+        plan));
   }
 
   @GetMapping("/points/ledger")
-  public List<PointsLedgerEntity> pointsLedger(@RequestParam(name = "limit", required = false, defaultValue = "50") int limit) {
+  public Result<List<PointsLedgerEntity>> pointsLedger(@RequestParam(name = "limit", required = false, defaultValue = "50") int limit) {
     TransitPrincipal principal = currentPrincipal();
-    return membershipQueryService.listPointsLedger(principal.subjectId(), limit);
+    return Result.success(membershipQueryService.listPointsLedger(principal.subjectId(), limit));
   }
 
   private TransitPrincipal currentPrincipal() {

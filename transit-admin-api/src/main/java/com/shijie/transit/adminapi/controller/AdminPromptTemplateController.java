@@ -2,6 +2,7 @@ package com.shijie.transit.adminapi.controller;
 
 import com.shijie.transit.adminapi.service.PromptTemplateService;
 import com.shijie.transit.common.db.entity.PromptTemplateEntity;
+import com.shijie.transit.common.web.Result;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -20,27 +21,28 @@ public class AdminPromptTemplateController {
     }
 
     @GetMapping
-    public List<PromptTemplateEntity> list() {
-        return promptTemplateService.list();
+    public Result<List<PromptTemplateEntity>> list() {
+        return Result.success(promptTemplateService.list());
     }
 
     @PostMapping
-    public PromptTemplateEntity create(@RequestBody PromptTemplateEntity entity) {
-        return promptTemplateService.create(entity);
+    public Result<PromptTemplateEntity> create(@RequestBody PromptTemplateEntity entity) {
+        return Result.success(promptTemplateService.create(entity));
     }
 
     @PutMapping("/{id}")
-    public PromptTemplateEntity update(@PathVariable("id") Long id, @RequestBody PromptTemplateEntity entity) {
-        return promptTemplateService.update(id, entity);
+    public Result<PromptTemplateEntity> update(@PathVariable("id") Long id, @RequestBody PromptTemplateEntity entity) {
+        return Result.success(promptTemplateService.update(id, entity));
     }
 
     @DeleteMapping("/{id}")
-    public void delete(@PathVariable("id") Long id) {
+    public Result<Void> delete(@PathVariable("id") Long id) {
         promptTemplateService.delete(id);
+        return Result.success(null);
     }
 
     @GetMapping("/{id}")
-    public PromptTemplateEntity getById(@PathVariable("id") Long id) {
-        return promptTemplateService.getById(id);
+    public Result<PromptTemplateEntity> getById(@PathVariable("id") Long id) {
+        return Result.success(promptTemplateService.getById(id));
     }
 }

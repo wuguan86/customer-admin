@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.shijie.transit.common.web.ErrorCode;
 import com.shijie.transit.common.web.TransitException;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.io.ByteArrayResource;
@@ -60,6 +62,22 @@ public class DifyClient {
           .body(String.class);
       log.info("Dify createDataset responseSize={}", responseJson == null ? 0 : responseJson.length());
       return parseDatasetResult(responseJson);
+    } catch (RestClientResponseException ex) {
+      throw toTransitException(ex);
+    }
+  }
+
+  public DifyDatasetListResult getDatasets(int page, int limit) {
+    try {
+      log.info("Dify getDatasets page={} limit={}", page, limit);
+      String responseJson = restClientForDataset().get()
+          .uri(uriBuilder -> uriBuilder.path("/v1/datasets")
+              .queryParam("page", page)
+              .queryParam("limit", limit)
+              .build())
+          .retrieve()
+          .body(String.class);
+      return parseDatasetListResult(responseJson);
     } catch (RestClientResponseException ex) {
       throw toTransitException(ex);
     }
@@ -193,6 +211,33 @@ public class DifyClient {
 
   public record DifyDatasetResult(String rawJson, String datasetId) {
   }
+
+  private DifyDatasetListResult parseDatasetListResult(String responseJson) {
+    if (responseJson == null) {
+      return new DifyDatasetListResult(List.of(), false);
+    }
+    try {
+      JsonNode node = objectMapper.readTree(responseJson);
+      List<DifyDatasetItem> items = new ArrayList<>();
+      if (node.hasNonNull("data")) {
+        for (JsonNode itemNode : node.get("data")) {
+          String id = itemNode.hasNonNull("id") ? itemNode.get("id").asText() : null;
+          String name = itemNode.hasNonNull("name") ? itemNode.get("name").asText() : null;
+          if (id != null && name != null) {
+            items.add(new DifyDatasetItem(id, name));
+          }
+        }
+      }
+      boolean hasMore = node.hasNonNull("has_more") && node.get("has_more").asBoolean();
+      return new DifyDatasetListResult(items, hasMore);
+    } catch (Exception ex) {
+      log.error("Failed to parse dataset list", ex);
+      return new DifyDatasetListResult(List.of(), false);
+    }
+  }
+
+  public record DifyDatasetItem(String id, String name) {}
+  public record DifyDatasetListResult(List<DifyDatasetItem> data, boolean hasMore) {}
 
   private TransitException toTransitException(RestClientResponseException ex) {
     ErrorCode errorCode = switch (ex.getRawStatusCode()) {

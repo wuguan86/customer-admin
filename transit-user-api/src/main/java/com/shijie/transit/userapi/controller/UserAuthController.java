@@ -1,23 +1,32 @@
 package com.shijie.transit.userapi.controller;
 
+import com.shijie.transit.common.web.Result;
 import com.shijie.transit.userapi.service.WeChatAuthService;
 import com.shijie.transit.userapi.wechat.WeChatMpProperties;
 import com.shijie.transit.userapi.wechat.WeChatOpenProperties;
 
+import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
-import java.net.URI;
 import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.HashMap;
+import java.util.Map;
 import javax.crypto.Cipher;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+import javax.xml.parsers.DocumentBuilderFactory;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.util.UriComponentsBuilder;
+import org.w3c.dom.Document;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
 
 @RestController
 @RequestMapping("/api/user/auth/wechat")
@@ -36,140 +45,133 @@ public class UserAuthController {
   }
 
   @GetMapping("/qrcode")
-  public WeChatAuthService.QrCodeResult qrcode(
+  public Result<WeChatAuthService.QrCodeResult> qrcode(
       @RequestParam(name = "tenantId", required = false, defaultValue = "1") long tenantId,
       @RequestParam(name = "redirect", required = false) String redirect) {
-    return weChatAuthService.createQrCode(tenantId, redirect);
+    return Result.success(weChatAuthService.createQrCode(tenantId, redirect));
   }
 
   @GetMapping("/callback")
-  public ResponseEntity<?> callback(
+  public ResponseEntity<String> callbackVerify(
       @RequestParam(name = "signature", required = false) String signature,
       @RequestParam(name = "msg_signature", required = false) String msgSignature,
       @RequestParam(name = "timestamp", required = false) String timestamp,
       @RequestParam(name = "nonce", required = false) String nonce,
-      @RequestParam(name = "echostr", required = false) String echostr,
-      @RequestParam(name = "code", required = false) String code,
-      @RequestParam(name = "state", required = false) String state) {
-    // 强制打印收到的所有参数，看看控制台有没有输出
-    System.out.println("======= 微信回调触发 =======");
-    System.out.println("code: " + code);
-    System.out.println("echostr: " + echostr);
-
-    try {
-      if (echostr != null && !echostr.isBlank() && timestamp != null && !timestamp.isBlank() && nonce != null && !nonce.isBlank()) {
-        String token = weChatMpProperties.getToken();
-        if (token == null || token.isBlank()) {
-          return ResponseEntity.status(500)
-                  .header("Content-Type", "text/plain; charset=UTF-8")
-                  .body("wechat mp token not configured");
-        }
-
-        if (msgSignature != null && !msgSignature.isBlank()) {
-          if (!verifySignature(token, msgSignature, timestamp, nonce, echostr)) {
-            return ResponseEntity.status(403)
-                    .header("Content-Type", "text/plain; charset=UTF-8")
-                    .body("invalid signature");
-          }
-          String plain = decryptEchostr(echostr, weChatMpProperties.getEncodingAesKey(), weChatOpenProperties.getAppId());
-          if (plain == null) {
-            return ResponseEntity.status(403)
-                    .header("Content-Type", "text/plain; charset=UTF-8")
-                    .body("decrypt failed");
-          }
-          return ResponseEntity.ok()
-                  .header("Content-Type", "text/plain; charset=UTF-8")
-                  .body(plain);
-        }
-
-        if (signature == null || signature.isBlank()) {
-          return ResponseEntity.status(403)
-                  .header("Content-Type", "text/plain; charset=UTF-8")
-                  .body("signature required");
-        }
-        if (!verifySignature(token, signature, timestamp, nonce)) {
-          return ResponseEntity.status(403)
-                  .header("Content-Type", "text/plain; charset=UTF-8")
-                  .body("invalid signature");
-        }
-        return ResponseEntity.ok()
-                .header("Content-Type", "text/plain; charset=UTF-8")
-                .body(echostr);
-      }
-
-      if (code == null || code.isBlank() || state == null || state.isBlank()) {
-        return ResponseEntity.badRequest()
-                .header("Content-Type", "text/plain; charset=UTF-8")
-                .body("code/state required");
-      }
-      WeChatAuthService.CallbackResult result = weChatAuthService.handleCallback(code, state);
-      if (result.redirect() == null || result.redirect().isBlank()) {
-        String html = """
-          <!doctype html>
-          <html lang="zh-CN">
-          <head>
-            <meta charset="utf-8" />
-            <meta name="viewport" content="width=device-width, initial-scale=1" />
-            <title>登录成功</title>
-            <style>
-              body { font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,'Noto Sans','PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif; margin: 0; padding: 24px; background: #f6f7fb; color: #111827; }
-              .card { max-width: 520px; margin: 0 auto; background: #fff; border: 1px solid rgba(17,24,39,.08); border-radius: 14px; padding: 20px; box-shadow: 0 10px 30px rgba(17,24,39,.08); }
-              h3 { margin: 0 0 10px 0; font-size: 18px; }
-              p { margin: 8px 0; line-height: 1.6; color: rgba(17,24,39,.72); }
-              .tip { margin-top: 14px; font-size: 12px; color: rgba(17,24,39,.55); }
-              .btn { display: inline-block; margin-top: 14px; padding: 10px 14px; border-radius: 10px; background: #16a34a; color: #fff; text-decoration: none; }
-            </style>
-          </head>
-          <body>
-            <div class="card">
-              <h3>微信登录成功</h3>
-              <p>请回到电脑端应用，登录会自动完成。</p>
-              <p class="tip">你可以直接关闭此页面。</p>
-              <a class="btn" href="javascript:window.close()">关闭页面</a>
-            </div>
-          </body>
-          </html>
-          """;
-        return ResponseEntity.ok()
-                .header("Content-Type", "text/html; charset=UTF-8")
-                .body(html);
-      }
-
-      String redirectUrl = UriComponentsBuilder.fromUriString(result.redirect())
-              .queryParam("token", result.token())
-              .queryParam("tenantId", result.tenantId())
-              .queryParam("userId", result.userId())
-              .build()
-              .toUriString();
-      return ResponseEntity.status(302).location(URI.create(redirectUrl)).build();
-    }catch (Exception e){
-      String message = e.getMessage() == null ? "" : e.getMessage();
-      if ("login processing".equalsIgnoreCase(message)) {
-        String html = buildSimpleHtml("处理中", "已扫码，正在处理登录，请回到电脑端应用。");
-        return ResponseEntity.ok()
-                .header("Content-Type", "text/html; charset=UTF-8")
-                .body(html);
-      }
-      if ("login failed".equalsIgnoreCase(message)) {
-        String html = buildSimpleHtml("登录失败", "登录失败，请返回客户端刷新二维码后重试。");
-        return ResponseEntity.ok()
-                .header("Content-Type", "text/html; charset=UTF-8")
-                .body(html);
-      }
-      if ("state invalid or expired".equalsIgnoreCase(message)) {
-        String html = buildSimpleHtml("二维码已过期", "二维码已过期，请返回客户端刷新二维码后重试。");
-        return ResponseEntity.ok()
-                .header("Content-Type", "text/html; charset=UTF-8")
-                .body(html);
-      }
-      e.printStackTrace();
-      return ResponseEntity.status(500).body(message);
+      @RequestParam(name = "echostr", required = false) String echostr) {
+    if (echostr == null || echostr.isBlank() || timestamp == null || timestamp.isBlank() || nonce == null || nonce.isBlank()) {
+      return ResponseEntity.badRequest()
+          .contentType(MediaType.TEXT_PLAIN)
+          .body("echostr/timestamp/nonce required");
     }
+
+    String token = weChatMpProperties.getToken();
+    if (token == null || token.isBlank()) {
+      return ResponseEntity.status(500)
+          .contentType(MediaType.TEXT_PLAIN)
+          .body("wechat mp token not configured");
+    }
+
+    if (msgSignature != null && !msgSignature.isBlank()) {
+      if (!verifySignature(token, msgSignature, timestamp, nonce, echostr)) {
+        return ResponseEntity.status(403).contentType(MediaType.TEXT_PLAIN).body("invalid signature");
+      }
+      String plain = decryptCipherText(echostr, weChatMpProperties.getEncodingAesKey(), weChatOpenProperties.getAppId());
+      if (plain == null) {
+        return ResponseEntity.status(403).contentType(MediaType.TEXT_PLAIN).body("decrypt failed");
+      }
+      return ResponseEntity.ok().contentType(MediaType.TEXT_PLAIN).body(plain);
+    }
+
+    if (signature == null || signature.isBlank()) {
+      return ResponseEntity.status(403).contentType(MediaType.TEXT_PLAIN).body("signature required");
+    }
+    if (!verifySignature(token, signature, timestamp, nonce)) {
+      return ResponseEntity.status(403).contentType(MediaType.TEXT_PLAIN).body("invalid signature");
+    }
+    return ResponseEntity.ok().contentType(MediaType.TEXT_PLAIN).body(echostr);
+  }
+
+  @PostMapping(
+      value = "/callback",
+      consumes = {MediaType.TEXT_XML_VALUE, MediaType.APPLICATION_XML_VALUE, MediaType.ALL_VALUE},
+      produces = MediaType.TEXT_PLAIN_VALUE)
+  public ResponseEntity<String> callbackMessage(
+      @RequestParam(name = "signature", required = false) String signature,
+      @RequestParam(name = "msg_signature", required = false) String msgSignature,
+      @RequestParam(name = "timestamp", required = false) String timestamp,
+      @RequestParam(name = "nonce", required = false) String nonce,
+      @RequestBody(required = false) String body) {
+    if (timestamp == null || timestamp.isBlank() || nonce == null || nonce.isBlank()) {
+      return ResponseEntity.badRequest().contentType(MediaType.TEXT_PLAIN).body("timestamp/nonce required");
+    }
+
+    String token = weChatMpProperties.getToken();
+    if (token == null || token.isBlank()) {
+      return ResponseEntity.status(500).contentType(MediaType.TEXT_PLAIN).body("wechat mp token not configured");
+    }
+    if (body == null || body.isBlank()) {
+      return ResponseEntity.ok("success");
+    }
+
+    boolean encrypted = (msgSignature != null && !msgSignature.isBlank()) || body.contains("<Encrypt>");
+    String plainXml = body;
+    if (encrypted) {
+      if (msgSignature == null || msgSignature.isBlank()) {
+        return ResponseEntity.status(403).contentType(MediaType.TEXT_PLAIN).body("msg_signature required");
+      }
+      Map<String, String> outer = parseXmlFirstLevel(body);
+      String encrypt = outer.get("Encrypt");
+      if (encrypt == null || encrypt.isBlank()) {
+        return ResponseEntity.badRequest().contentType(MediaType.TEXT_PLAIN).body("encrypt required");
+      }
+      if (!verifySignature(token, msgSignature, timestamp, nonce, encrypt)) {
+        return ResponseEntity.status(403).contentType(MediaType.TEXT_PLAIN).body("invalid signature");
+      }
+      plainXml = decryptCipherText(encrypt, weChatMpProperties.getEncodingAesKey(), weChatOpenProperties.getAppId());
+      if (plainXml == null) {
+        return ResponseEntity.status(403).contentType(MediaType.TEXT_PLAIN).body("decrypt failed");
+      }
+    } else {
+      if (signature == null || signature.isBlank()) {
+        return ResponseEntity.status(403).contentType(MediaType.TEXT_PLAIN).body("signature required");
+      }
+      if (!verifySignature(token, signature, timestamp, nonce)) {
+        return ResponseEntity.status(403).contentType(MediaType.TEXT_PLAIN).body("invalid signature");
+      }
+    }
+
+    Map<String, String> msg = parseXmlFirstLevel(plainXml);
+    String msgType = msg.get("MsgType");
+    if (msgType == null || !"event".equalsIgnoreCase(msgType)) {
+      return ResponseEntity.ok("success");
+    }
+
+    String event = msg.get("Event");
+    String fromUserName = msg.get("FromUserName");
+    String eventKey = msg.get("EventKey");
+    if (event == null || fromUserName == null || fromUserName.isBlank()) {
+      return ResponseEntity.ok("success");
+    }
+
+    String scene = null;
+    if ("SCAN".equalsIgnoreCase(event)) {
+      scene = eventKey;
+    } else if ("subscribe".equalsIgnoreCase(event)) {
+      scene = eventKey;
+      if (scene != null && scene.startsWith("qrscene_")) {
+        scene = scene.substring("qrscene_".length());
+      }
+    }
+
+    if (scene != null && !scene.isBlank()) {
+      weChatAuthService.handleScanLogin(fromUserName, scene);
+    }
+    return ResponseEntity.ok("success");
   }
 
   @GetMapping("/status")
-  public WeChatAuthService.LoginPollResult status(@RequestParam("state") String state) {
-    return weChatAuthService.pollLogin(state);
+  public Result<WeChatAuthService.LoginPollResult> status(@RequestParam("state") String state) {
+    return Result.success(weChatAuthService.pollLogin(state));
   }
 
   private static boolean verifySignature(String token, String signature, String timestamp, String nonce) {
@@ -203,7 +205,7 @@ public class UserAuthController {
     }
   }
 
-  private static String decryptEchostr(String echostr, String encodingAesKey, String appId) {
+  private static String decryptCipherText(String cipherTextBase64, String encodingAesKey, String appId) {
     if (encodingAesKey == null || encodingAesKey.isBlank()) {
       return null;
     }
@@ -212,7 +214,7 @@ public class UserAuthController {
     }
     try {
       byte[] aesKey = Base64.getDecoder().decode(encodingAesKey + "=");
-      byte[] cipherText = Base64.getDecoder().decode(echostr);
+      byte[] cipherText = Base64.getDecoder().decode(cipherTextBase64);
       Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
       SecretKeySpec keySpec = new SecretKeySpec(aesKey, "AES");
       IvParameterSpec iv = new IvParameterSpec(Arrays.copyOfRange(aesKey, 0, 16));
@@ -244,28 +246,39 @@ public class UserAuthController {
     }
   }
 
-  private static String buildSimpleHtml(String title, String message) {
-    return """
-      <!doctype html>
-      <html lang="zh-CN">
-      <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>%s</title>
-        <style>
-          body { font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,'Noto Sans','PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif; margin: 0; padding: 24px; background: #f6f7fb; color: #111827; }
-          .card { max-width: 520px; margin: 0 auto; background: #fff; border: 1px solid rgba(17,24,39,.08); border-radius: 14px; padding: 20px; box-shadow: 0 10px 30px rgba(17,24,39,.08); }
-          h3 { margin: 0 0 10px 0; font-size: 18px; }
-          p { margin: 8px 0; line-height: 1.6; color: rgba(17,24,39,.72); }
-        </style>
-      </head>
-      <body>
-        <div class="card">
-          <h3>%s</h3>
-          <p>%s</p>
-        </div>
-      </body>
-      </html>
-      """.formatted(title, title, message);
+  private static Map<String, String> parseXmlFirstLevel(String xml) {
+    if (xml == null || xml.isBlank()) {
+      return Map.of();
+    }
+    try {
+      DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+      factory.setExpandEntityReferences(false);
+      factory.setXIncludeAware(false);
+      factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+      factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+      factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+
+      Document doc = factory.newDocumentBuilder().parse(new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
+      Node root = doc.getDocumentElement();
+      if (root == null) {
+        return Map.of();
+      }
+      NodeList children = root.getChildNodes();
+      Map<String, String> map = new HashMap<>();
+      for (int i = 0; i < children.getLength(); i++) {
+        Node node = children.item(i);
+        if (node == null || node.getNodeType() != Node.ELEMENT_NODE) {
+          continue;
+        }
+        String key = node.getNodeName();
+        String value = node.getTextContent();
+        if (key != null && value != null) {
+          map.put(key, value.trim());
+        }
+      }
+      return map;
+    } catch (Exception e) {
+      return Map.of();
+    }
   }
 }

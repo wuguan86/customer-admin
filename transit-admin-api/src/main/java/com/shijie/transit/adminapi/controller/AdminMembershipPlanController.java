@@ -2,6 +2,7 @@ package com.shijie.transit.adminapi.controller;
 
 import com.shijie.transit.adminapi.service.MembershipPlanService;
 import com.shijie.transit.common.db.entity.MembershipPlanEntity;
+import com.shijie.transit.common.web.Result;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -24,26 +25,27 @@ public class AdminMembershipPlanController {
   }
 
   @GetMapping
-  public Object list(@RequestParam(name = "enabled", required = false) Boolean enabled) {
-    return membershipPlanService.list(enabled);
+  public Result<Object> list(@RequestParam(name = "enabled", required = false) Boolean enabled) {
+    return Result.success(membershipPlanService.list(enabled));
   }
 
   @PostMapping
-  public MembershipPlanEntity create(@Valid @RequestBody CreatePlanRequest request) {
+  public Result<MembershipPlanEntity> create(@Valid @RequestBody CreatePlanRequest request) {
     MembershipPlanEntity entity = toEntity(request);
     entity.setEnabled(true);
-    return membershipPlanService.create(entity);
+    return Result.success(membershipPlanService.create(entity));
   }
 
   @PutMapping("/{id}")
-  public MembershipPlanEntity update(@PathVariable("id") long id, @RequestBody UpdatePlanRequest request) {
+  public Result<MembershipPlanEntity> update(@PathVariable("id") long id, @RequestBody UpdatePlanRequest request) {
     MembershipPlanEntity changes = toEntity(request);
-    return membershipPlanService.update(id, changes);
+    return Result.success(membershipPlanService.update(id, changes));
   }
 
   @PostMapping("/{id}/enabled")
-  public void setEnabled(@PathVariable("id") long id, @RequestParam("enabled") boolean enabled) {
+  public Result<Void> setEnabled(@PathVariable("id") long id, @RequestParam("enabled") boolean enabled) {
     membershipPlanService.setEnabled(id, enabled);
+    return Result.success(null);
   }
 
   private MembershipPlanEntity toEntity(PlanBase request) {

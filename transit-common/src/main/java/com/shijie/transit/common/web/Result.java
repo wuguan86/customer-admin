@@ -9,31 +9,35 @@ package com.shijie.transit.common.web;
  *
  * @param <T> 数据载荷类型
  */
-public class ApiResponse<T> {
+public class Result<T> {
   private int code;
-  private String message;
+  private String msg;
   private T data;
   private long timestamp;
   private String traceId;
 
-  public ApiResponse() {
+  public Result() {
   }
 
-  public ApiResponse(int code, String message, T data, long timestamp, String traceId) {
+  public Result(int code, String msg, T data, long timestamp, String traceId) {
     this.code = code;
-    this.message = message;
+    this.msg = msg;
     this.data = data;
     this.timestamp = timestamp;
     this.traceId = traceId;
   }
 
-  public static <T> ApiResponse<T> ok(T data, long timestamp, String traceId) {
-    return new ApiResponse<>(ErrorCode.OK.code(), ErrorCode.OK.defaultMessage(), data, timestamp, traceId);
+  public static <T> Result<T> ok(T data, long timestamp, String traceId) {
+    return new Result<>(ErrorCode.OK.code(), ErrorCode.OK.defaultMessage(), data, timestamp, traceId);
   }
 
-  public static <T> ApiResponse<T> error(ErrorCode errorCode, String message, long timestamp, String traceId) {
+  public static <T> Result<T> success(T data) {
+    return new Result<>(ErrorCode.OK.code(), ErrorCode.OK.defaultMessage(), data, System.currentTimeMillis(), null);
+  }
+
+  public static <T> Result<T> error(ErrorCode errorCode, String message, long timestamp, String traceId) {
     String msg = (message == null || message.isBlank()) ? errorCode.defaultMessage() : message;
-    return new ApiResponse<>(errorCode.code(), msg, null, timestamp, traceId);
+    return new Result<>(errorCode.code(), msg, null, timestamp, traceId);
   }
 
   public int getCode() {
@@ -44,12 +48,12 @@ public class ApiResponse<T> {
     this.code = code;
   }
 
-  public String getMessage() {
-    return message;
+  public String getMsg() {
+    return msg;
   }
 
-  public void setMessage(String message) {
-    this.message = message;
+  public void setMsg(String msg) {
+    this.msg = msg;
   }
 
   public T getData() {

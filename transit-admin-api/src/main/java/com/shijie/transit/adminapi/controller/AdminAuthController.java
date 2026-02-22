@@ -1,6 +1,7 @@
 package com.shijie.transit.adminapi.controller;
 
 import com.shijie.transit.adminapi.service.AdminAuthService;
+import com.shijie.transit.common.web.Result;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -18,8 +19,8 @@ public class AdminAuthController {
   }
 
   @PostMapping("/login")
-  public AdminAuthService.LoginResult login(@Valid @RequestBody LoginRequest request) {
-    return adminAuthService.login(request.username(), request.password());
+  public Result<AdminAuthService.LoginResult> login(@Valid @RequestBody LoginRequest request) {
+    return Result.success(adminAuthService.login(request.username(), request.password()));
   }
 
   public record LoginRequest(@NotBlank String username, @NotBlank String password) {
