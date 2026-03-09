@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.shijie.transit.common.security.TransitPrincipal;
+import com.shijie.transit.common.tenant.TenantContext;
 import com.shijie.transit.common.db.entity.TaskEntity;
 import com.shijie.transit.common.web.Result;
 import com.shijie.transit.common.web.TransitException;
@@ -13,9 +14,7 @@ import com.shijie.transit.userapi.service.DifyMappingService;
 import com.shijie.transit.userapi.service.TaskService;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,6 +31,9 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
+import java.util.concurrent.CompletableFuture;
 
 @RestController
 @RequestMapping("/api/user/dify")
@@ -151,6 +153,131 @@ public class UserDifyController {
                 principal.subjectId(), request.taskId(), result.conversationId(),
                 result.answer() == null ? 0 : result.answer().length());
         return Result.success(objectMapper.readTree(result.rawJson()));
+    }
+
+    @PostMapping(value = "/monitor-chat/stream")
+    public SseEmitter monitorChatStream(@RequestBody MonitorChatRequest request) {
+        SseEmitter emitter = new SseEmitter(180000L); // 3 mins timeout
+        TransitPrincipal principal = currentPrincipal();
+        Long tenantId = TenantContext.getTenantId();
+        
+        CompletableFuture.runAsync(() -> {
+            try {
+                TenantContext.setTenantId(tenantId);
+                if (request == null || !StringUtils.hasText(request.message()) || request.taskId() == null) {
+                    emitter.completeWithError(new IllegalArgumentException("Invalid request"));
+                    return;
+                }
+
+                // Step 1: INTENT
+                TaskEntity task = taskService.getById(principal.subjectId(), request.taskId());
+                String contactName = StringUtils.hasText(request.wechatContact()) ? request.wechatContact() : "未知客户";
+                String question = request.message();
+                if (question.length() > 20) {
+                    question = question.substring(0, 20) + "...";
+                }
+                String intentMsg = "正在分析微信聊天记录... 识别到客户 “" + contactName + "” 的消息： “" + question + "”，正在按【" + task.getName() + "】任务逻辑进行思考和回复。";
+                emitter.send(SseEmitter.event().data(new StepMsg("INTENT", intentMsg)));
+
+                // Step 2: KNOWLEDGE
+                String datasetId = ensureTaskKnowledgeBase(task);
+                String retrieveJson = difyClient.retrieveDataset(datasetId, request.message());
+                log.info("retrieveJson是"+retrieveJson);
+                String docTitles = extractDocTitles(retrieveJson);
+                log.info("docTitles是"+docTitles);
+                String knowledgeMsg = StringUtils.hasText(docTitles) 
+                    ? "检索 “流程库” 与 “项目库” ... 匹配到 " + docTitles + " 。"
+                    : "检索知识库... 未匹配到相关文档。";
+                emitter.send(SseEmitter.event().data(new StepMsg("KNOWLEDGE", knowledgeMsg)));
+
+                // Step 3: LOGIC
+                String logicMsg = "模型的 think 路径：分析客户所在地 -> 匹配当地政策 -> 组织专业回复。";
+                emitter.send(SseEmitter.event().data(new StepMsg("LOGIC", logicMsg)));
+
+                // Step 4: OUTPUT (Start)
+                String context = buildContextFromRetrieve(retrieveJson);
+                boolean hasTaskRole = StringUtils.hasText(task.getContent());
+                String role = hasTaskRole ? task.getContent() : request.role();
+
+                ObjectNode payload = objectMapper.createObjectNode();
+                payload.put("query", request.message());
+                ObjectNode inputs = payload.putObject("inputs");
+                inputs.put("context", context == null ? "" : context);
+                if (StringUtils.hasText(role)) {
+                    inputs.put("user_custom_role", role);
+                }
+                payload.put("user", "user-" + principal.subjectId());
+                
+                String conversationId = request.conversationId();
+                boolean hasContact = StringUtils.hasText(request.wechatContact());
+                if (hasContact) {
+                    String mappedId = contactConversationMappingService.getConversationId(
+                            principal.subjectId(), request.taskId(), request.wechatContact());
+                    if (StringUtils.hasText(mappedId)) conversationId = mappedId;
+                }
+                if (StringUtils.hasText(conversationId)) {
+                    payload.put("conversation_id", conversationId);
+                }
+
+                DifyClient.DifyChatResult result = difyClient.chatMessages(payload.toString());
+                
+                // Update conversation mapping
+                if (StringUtils.hasText(result.conversationId())) {
+                    mappingService.recordConversation(principal.subjectId(), result.conversationId());
+                    if (hasContact) {
+                        contactConversationMappingService.upsertConversationId(
+                                principal.subjectId(), request.taskId(), request.wechatContact(), result.conversationId());
+                    }
+                }
+
+                String answer = result.answer();
+                emitter.send(SseEmitter.event().data(new StepMsg("OUTPUT", answer)));
+                
+                emitter.complete();
+            } catch (Exception e) {
+                log.error("Monitor chat stream error", e);
+                emitter.completeWithError(e);
+            } finally {
+                TenantContext.clear();
+            }
+        });
+
+        return emitter;
+    }
+
+    private String extractDocTitles(String retrieveJson) {
+        if (!StringUtils.hasText(retrieveJson)) return "";
+        try {
+            JsonNode node = objectMapper.readTree(retrieveJson);
+            JsonNode records = node.path("records");
+            if (!records.isArray()) records = node.path("data");
+            if (!records.isArray()) return "";
+
+            Set<String> titles = new LinkedHashSet<>();
+            for (JsonNode record : records) {
+                // Try to find document name in nested structure first
+                JsonNode docNode = record.path("segment").path("document");
+                if (docNode.isMissingNode()) {
+                    // Fallback to direct document node
+                    docNode = record.path("document");
+                }
+                
+                if (docNode.isMissingNode()) continue;
+                
+                String name = "";
+                if (docNode.has("name")) name = docNode.get("name").asText();
+                else if (docNode.has("title")) name = docNode.get("title").asText();
+                
+                if (StringUtils.hasText(name)) {
+                    titles.add("《" + name + "》");
+                }
+                if (titles.size() >= 3) break;
+            }
+            return String.join("、", titles);
+        } catch (Exception e) {
+            log.error("Extract doc titles error", e);
+            return "";
+        }
     }
 
     @GetMapping("/tasks/{taskId}/kb")
@@ -399,5 +526,8 @@ public class UserDifyController {
 
     public record MonitorChatRequest(Long taskId, String message, String role, String conversationId,
                                      String wechatContact) {
+    }
+
+    public record StepMsg(String step, String content) {
     }
 }
