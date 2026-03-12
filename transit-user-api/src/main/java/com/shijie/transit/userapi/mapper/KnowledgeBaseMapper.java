@@ -1,9 +1,9 @@
 package com.shijie.transit.userapi.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
-import com.shijie.transit.common.db.entity.TaskEntity;
+import com.shijie.transit.common.db.entity.KnowledgeBaseEntity;
 import org.apache.ibatis.annotations.Mapper;
 
 @Mapper
-public interface TaskMapper extends BaseMapper<TaskEntity> {
+public interface KnowledgeBaseMapper extends BaseMapper<KnowledgeBaseEntity> {
 }

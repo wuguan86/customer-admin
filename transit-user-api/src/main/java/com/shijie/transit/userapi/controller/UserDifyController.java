@@ -3,19 +3,22 @@ package com.shijie.transit.userapi.controller;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.shijie.transit.common.db.entity.KnowledgeBaseEntity;
+import com.shijie.transit.common.db.entity.KnowledgeBaseFileEntity;
+import com.shijie.transit.common.db.entity.RoleEntity;
 import com.shijie.transit.common.security.TransitPrincipal;
 import com.shijie.transit.common.tenant.TenantContext;
-import com.shijie.transit.common.db.entity.TaskEntity;
 import com.shijie.transit.common.web.Result;
 import com.shijie.transit.common.web.TransitException;
 import com.shijie.transit.userapi.dify.DifyClient;
+import com.shijie.transit.userapi.dify.DifyProperties;
 import com.shijie.transit.userapi.service.DifyContactConversationMappingService;
 import com.shijie.transit.userapi.service.DifyMappingService;
-import com.shijie.transit.userapi.service.TaskService;
-
-import java.io.IOException;
-import java.util.*;
-
+import com.shijie.transit.userapi.service.KnowledgeBaseService;
+import com.shijie.transit.userapi.service.RoleKnowledgeBaseService;
+import com.shijie.transit.userapi.service.RoleService;
+import com.shijie.transit.userapi.service.SessionConfigService;
+import com.shijie.transit.userapi.service.SessionHistoryService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
@@ -25,7 +28,6 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestPart;
@@ -33,6 +35,13 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 @RestController
@@ -42,87 +51,93 @@ public class UserDifyController {
     private final DifyClient difyClient;
     private final DifyMappingService mappingService;
     private final DifyContactConversationMappingService contactConversationMappingService;
-    private final TaskService taskService;
+    private final RoleService roleService;
+    private final RoleKnowledgeBaseService roleKnowledgeBaseService;
+    private final KnowledgeBaseService knowledgeBaseService;
+    private final SessionConfigService sessionConfigService;
+    private final SessionHistoryService sessionHistoryService;
+    private final DifyProperties difyProperties;
     private final ObjectMapper objectMapper;
 
     public UserDifyController(
             DifyClient difyClient,
             DifyMappingService mappingService,
             DifyContactConversationMappingService contactConversationMappingService,
-            TaskService taskService,
+            RoleService roleService,
+            RoleKnowledgeBaseService roleKnowledgeBaseService,
+            KnowledgeBaseService knowledgeBaseService,
+            SessionConfigService sessionConfigService,
+            SessionHistoryService sessionHistoryService,
+            DifyProperties difyProperties,
             ObjectMapper objectMapper) {
         this.difyClient = difyClient;
         this.mappingService = mappingService;
         this.contactConversationMappingService = contactConversationMappingService;
-        this.taskService = taskService;
+        this.roleService = roleService;
+        this.roleKnowledgeBaseService = roleKnowledgeBaseService;
+        this.knowledgeBaseService = knowledgeBaseService;
+        this.sessionConfigService = sessionConfigService;
+        this.sessionHistoryService = sessionHistoryService;
+        this.difyProperties = difyProperties;
         this.objectMapper = objectMapper;
     }
 
     @PostMapping(value = "/chat-messages", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
     public Result<Object> chatMessages(@RequestBody String requestJson) throws IOException {
         TransitPrincipal principal = currentPrincipal();
-        log.info("Dify chatMessages start userId={} payloadSize={}", principal.subjectId(),
-                requestJson == null ? 0 : requestJson.length());
         String adjusted = adjustChatRequest(principal, requestJson);
         DifyClient.DifyChatResult result;
         try {
             result = difyClient.chatMessages(adjusted);
         } catch (TransitException ex) {
             if (isInvalidConversation(ex) && hasConversationId(adjusted)) {
-                String stripped = stripConversationId(adjusted);
-                log.info("Dify chatMessages retry without conversation userId={}", principal.subjectId());
-                result = difyClient.chatMessages(stripped);
+                result = difyClient.chatMessages(stripConversationId(adjusted));
             } else {
                 throw ex;
             }
         }
-        if (result.conversationId() != null && !result.conversationId().isBlank()) {
+        if (StringUtils.hasText(result.conversationId())) {
             mappingService.recordConversation(principal.subjectId(), result.conversationId());
         }
-        log.info("Dify chatMessages done userId={} conversationId={} answerSize={}", principal.subjectId(),
-                result.conversationId(), result.answer() == null ? 0 : result.answer().length());
         return Result.success(objectMapper.readTree(result.rawJson()));
     }
 
     @PostMapping(value = "/monitor-chat", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
     public Result<Object> monitorChat(@RequestBody MonitorChatRequest request) throws IOException {
         TransitPrincipal principal = currentPrincipal();
-        if (request == null || !StringUtils.hasText(request.message()) || request.taskId() == null) {
-            log.info("MonitorChat invalid request userId={}", principal.subjectId());
+        if (request == null || !StringUtils.hasText(request.message()) || request.roleId() == null) {
             return Result.success(objectMapper.createObjectNode());
         }
-
-        boolean hasContact = StringUtils.hasText(request.wechatContact());
-        log.info("MonitorChat start userId={} taskId={} messageSize={} hasContact={} conversationIdPresent={}",
-                principal.subjectId(), request.taskId(), request.message().length(),
-                hasContact,
-                StringUtils.hasText(request.conversationId()));
-        TaskEntity task = taskService.getById(principal.subjectId(), request.taskId());
-        String datasetId = ensureTaskKnowledgeBase(task);
-        log.info("MonitorChat dataset resolved userId={} taskId={} datasetId={}", principal.subjectId(),
-                request.taskId(), datasetId);
-        String retrieveJson = difyClient.retrieveDataset(datasetId, request.message());
-        log.info("MonitorChat retrieve done userId={} taskId={} datasetId={} retrieveSize={}",
-                principal.subjectId(), request.taskId(), datasetId, retrieveJson == null ? 0 : retrieveJson.length());
-        String context = buildContextFromRetrieve(retrieveJson);
-        boolean hasTaskRole = StringUtils.hasText(task.getContent());
-        String role = hasTaskRole ? task.getContent() : request.role();
-        log.info("MonitorChat context built userId={} taskId={} contextSize={} roleSource={}",
-                principal.subjectId(), request.taskId(), context == null ? 0 : context.length(),
-                hasTaskRole ? "TASK" : "REQUEST");
+        RoleEntity role = roleService.getById(principal.subjectId(), request.roleId());
+        List<String> datasetIds = resolveRoleDatasetIds(principal.subjectId(), role);
+        List<String> retrieveResults = retrieveFromDatasets(datasetIds, request.message());
+        String context = buildContextFromRetrieve(retrieveResults);
+        boolean hasRoleContent = StringUtils.hasText(role.getContent());
+        String roleContent = hasRoleContent ? role.getContent() : request.role();
 
         ObjectNode payload = objectMapper.createObjectNode();
         payload.put("query", request.message());
         ObjectNode inputs = payload.putObject("inputs");
         inputs.put("context", context == null ? "" : context);
-        if (StringUtils.hasText(role)) {
-            inputs.put("user_custom_role", role);
+        if (StringUtils.hasText(roleContent)) {
+            inputs.put("user_custom_role", roleContent);
         }
+        String sceneType = "SINGLE";
+        if ("GROUP".equalsIgnoreCase(request.roomType())) {
+            sceneType = "GROUP";
+        } else if (StringUtils.hasText(request.wechatContact()) && request.wechatContact().matches(".*\\(\\d+\\)$")) {
+            sceneType = "GROUP";
+        }
+        String sessionKey = resolveSessionKey(request.roleId(), request.wechatContact());
+        int memoryRounds = resolveMemoryRounds(principal.subjectId(), sceneType);
+        addHistoryToInputs(inputs, principal.subjectId(), request.roleId(), sceneType, sessionKey, memoryRounds);
+        sessionHistoryService.appendMessage(
+                principal.subjectId(), request.roleId(), sceneType, sessionKey, "USER", request.message());
         payload.put("user", "user-" + principal.subjectId());
         String mappedConversationId = null;
-        if (hasContact) {
+        if (StringUtils.hasText(request.wechatContact())) {
             mappedConversationId = contactConversationMappingService.getConversationId(
-                    principal.subjectId(), request.taskId(), request.wechatContact());
+                    principal.subjectId(), request.roleId(), request.wechatContact());
         }
         if (StringUtils.hasText(mappedConversationId)) {
             payload.put("conversation_id", mappedConversationId);
@@ -136,103 +151,188 @@ public class UserDifyController {
         } catch (TransitException ex) {
             if (isInvalidConversation(ex) && payload.hasNonNull("conversation_id")) {
                 payload.remove("conversation_id");
-                log.info("MonitorChat retry without conversation userId={} taskId={}", principal.subjectId(), request.taskId());
                 result = difyClient.chatMessages(payload.toString());
             } else {
                 throw ex;
             }
         }
-        if (result.conversationId() != null && !result.conversationId().isBlank()) {
+        if (StringUtils.hasText(result.conversationId())) {
             mappingService.recordConversation(principal.subjectId(), result.conversationId());
-            if (hasContact) {
+            if (StringUtils.hasText(request.wechatContact())) {
                 contactConversationMappingService.upsertConversationId(
-                        principal.subjectId(), request.taskId(), request.wechatContact(), result.conversationId());
+                        principal.subjectId(), request.roleId(), request.wechatContact(), result.conversationId());
             }
         }
-        log.info("MonitorChat done userId={} taskId={} conversationId={} answerSize={}",
-                principal.subjectId(), request.taskId(), result.conversationId(),
-                result.answer() == null ? 0 : result.answer().length());
+        if (StringUtils.hasText(result.answer())) {
+            sessionHistoryService.appendMessage(
+                    principal.subjectId(), request.roleId(), sceneType, sessionKey, "AI", result.answer());
+        }
         return Result.success(objectMapper.readTree(result.rawJson()));
     }
 
     @PostMapping(value = "/monitor-chat/stream")
     public SseEmitter monitorChatStream(@RequestBody MonitorChatRequest request) {
-        SseEmitter emitter = new SseEmitter(180000L); // 3 mins timeout
+        SseEmitter emitter = new SseEmitter(180000L);
         TransitPrincipal principal = currentPrincipal();
         Long tenantId = TenantContext.getTenantId();
-        
+
         CompletableFuture.runAsync(() -> {
             try {
                 TenantContext.setTenantId(tenantId);
-                if (request == null || !StringUtils.hasText(request.message()) || request.taskId() == null) {
+                if (request == null || !StringUtils.hasText(request.message()) || request.roleId() == null) {
                     emitter.completeWithError(new IllegalArgumentException("Invalid request"));
                     return;
                 }
-
-                // Step 1: INTENT
-                TaskEntity task = taskService.getById(principal.subjectId(), request.taskId());
+                RoleEntity role = roleService.getById(principal.subjectId(), request.roleId());
+                String question = request.message().length() > 20 ? request.message().substring(0, 20) + "..." : request.message();
                 String contactName = StringUtils.hasText(request.wechatContact()) ? request.wechatContact() : "未知客户";
-                String question = request.message();
-                if (question.length() > 20) {
-                    question = question.substring(0, 20) + "...";
-                }
-                String intentMsg = "正在分析微信聊天记录... 识别到客户 “" + contactName + "” 的消息： “" + question + "”，正在按【" + task.getName() + "】任务逻辑进行思考和回复。";
-                emitter.send(SseEmitter.event().data(new StepMsg("INTENT", intentMsg)));
+                emitter.send(SseEmitter.event().data(new StepMsg("INTENT",
+                        "正在分析微信聊天记录... 识别到客户 “" + contactName + "” 的消息： “" + question + "”，正在按【" + role.getName() + "】角色逻辑进行思考和回复。")));
 
-                // Step 2: KNOWLEDGE
-                String datasetId = ensureTaskKnowledgeBase(task);
-                String retrieveJson = difyClient.retrieveDataset(datasetId, request.message());
-                log.info("retrieveJson是"+retrieveJson);
-                String docTitles = extractDocTitles(retrieveJson);
-                log.info("docTitles是"+docTitles);
-                String knowledgeMsg = StringUtils.hasText(docTitles) 
-                    ? "检索 “流程库” 与 “项目库” ... 匹配到 " + docTitles + " 。"
-                    : "检索知识库... 未匹配到相关文档。";
+                // 检查是否触发 AI 停止回复
+                String sceneType = "SINGLE";
+                if ("GROUP".equalsIgnoreCase(request.roomType())) {
+                    sceneType = "GROUP";
+                } else if (StringUtils.hasText(request.wechatContact()) && request.wechatContact().matches(".*\\(\\d+\\)$")) {
+                    sceneType = "GROUP";
+                }
+
+                SessionConfigService.SessionConfigView configView = sessionConfigService.getConfig(principal.subjectId(), sceneType);
+                if (configView != null && configView.sceneConfig() != null && configView.sceneConfig().enabled() != null && configView.sceneConfig().enabled() == 0) {
+                     emitter.send(SseEmitter.event().data(new StepMsg("LOGIC", "会话配置已禁用 (sceneType=" + sceneType + ")，停止回复。")));
+                     emitter.complete();
+                     return;
+                }
+
+                if ("GROUP".equals(sceneType)) {
+                     // 群聊逻辑
+                     if (configView != null) {
+                         // 0. Time Range
+                         String startTimeStr = configView.sceneConfig().groupReplyStartTime();
+                         String endTimeStr = configView.sceneConfig().groupReplyEndTime();
+                         if (StringUtils.hasText(startTimeStr) && StringUtils.hasText(endTimeStr)) {
+                             try {
+                                 LocalTime now = LocalTime.now();
+                                 LocalTime start = LocalTime.parse(startTimeStr, DateTimeFormatter.ofPattern("HH:mm"));
+                                 LocalTime end = LocalTime.parse(endTimeStr, DateTimeFormatter.ofPattern("HH:mm"));
+                                 if (now.isBefore(start) || now.isAfter(end)) {
+                                     emitter.send(SseEmitter.event().data(new StepMsg("LOGIC", "当前时间 " + now + " 不在群回复时间段 " + start + "-" + end + " 内，停止回复。")));
+                                     emitter.complete();
+                                     return;
+                                 }
+                             } catch (Exception e) {
+                                 // log.warn("解析群回复时间段失败", e);
+                             }
+                         }
+
+                         // 1. Keyword Trigger
+                         Integer keywordTriggerEnabled = configView.replyStrategy().groupKeywordTriggerEnabled();
+                         List<String> triggerKeywords = configView.groupTriggerKeywords();
+                         String content = request.message();
+                         if (keywordTriggerEnabled != null && keywordTriggerEnabled == 1) {
+                             boolean matched = false;
+                             if (triggerKeywords != null && StringUtils.hasText(content)) {
+                                 for (String keyword : triggerKeywords) {
+                                     if (StringUtils.hasText(keyword) && content.contains(keyword)) {
+                                         matched = true;
+                                         break;
+                                     }
+                                 }
+                             }
+                             if (!matched) {
+                                 emitter.send(SseEmitter.event().data(new StepMsg("LOGIC", "未触发群消息关键词，停止回复。")));
+                                 emitter.complete();
+                                 return;
+                             }
+                         }
+                     }
+                } else {
+                    // 单聊逻辑
+                    if (configView != null && configView.replyStrategy() != null) {
+                        String content = request.message();
+
+                        // 优先检查人工介入 (优先级高于 AI 停止回复)
+                        // 如果关键词同时存在于两个配置中，优先执行人工介入逻辑
+                        Integer manualHandoffEnabled = configView.replyStrategy().manualHandoffEnabled();
+                        List<String> manualHandoffKeywords = configView.manualHandoffKeywords();
+
+                        if (manualHandoffEnabled != null && manualHandoffEnabled == 1 && manualHandoffKeywords != null && StringUtils.hasText(content)) {
+                            for (String keyword : manualHandoffKeywords) {
+                                if (StringUtils.hasText(keyword) && content.contains(keyword)) {
+                                    emitter.send(SseEmitter.event().data(new StepMsg("LOGIC", "触发人工介入关键词: " + keyword + "，停止 AI 回复并发送转接提示。")));
+                                    String handoffMsg = configView.replyStrategy().manualHandoffMessage();
+                                    if (StringUtils.hasText(handoffMsg)) {
+                                        emitter.send(SseEmitter.event().data(new StepMsg("OUTPUT", handoffMsg)));
+                                    }
+                                    emitter.complete();
+                                    return;
+                                }
+                            }
+                        }
+
+                        Integer stopReplyEnabled = configView.replyStrategy().aiStopReplyEnabled();
+                        List<String> stopKeywords = configView.aiStopReplyKeywords();
+
+                        if (stopReplyEnabled != null && stopReplyEnabled == 1 && stopKeywords != null && StringUtils.hasText(content)) {
+                            for (String keyword : stopKeywords) {
+                                if (StringUtils.hasText(keyword) && content.contains(keyword)) {
+                                    emitter.send(SseEmitter.event().data(new StepMsg("LOGIC", "触发 AI 停止回复关键词: " + keyword + "，停止回复。")));
+                                    emitter.complete();
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                List<String> datasetIds = resolveRoleDatasetIds(principal.subjectId(), role);
+                List<String> retrieveResults = retrieveFromDatasets(datasetIds, request.message());
+                String docTitles = extractDocTitles(retrieveResults);
+                String knowledgeMsg = StringUtils.hasText(docTitles) ? "检索知识库... 匹配到 " + docTitles + " 。" : "检索知识库... 未匹配到相关文档。";
                 emitter.send(SseEmitter.event().data(new StepMsg("KNOWLEDGE", knowledgeMsg)));
 
-                // Step 3: LOGIC
-                String logicMsg = "模型的 think 路径：分析客户所在地 -> 匹配当地政策 -> 组织专业回复。";
-                emitter.send(SseEmitter.event().data(new StepMsg("LOGIC", logicMsg)));
-
-                // Step 4: OUTPUT (Start)
-                String context = buildContextFromRetrieve(retrieveJson);
-                boolean hasTaskRole = StringUtils.hasText(task.getContent());
-                String role = hasTaskRole ? task.getContent() : request.role();
+                emitter.send(SseEmitter.event().data(new StepMsg("LOGIC", "模型正在组织回复逻辑并生成答案。")));
+                String context = buildContextFromRetrieve(retrieveResults);
+                boolean hasRoleContent = StringUtils.hasText(role.getContent());
+                String roleContent = hasRoleContent ? role.getContent() : request.role();
 
                 ObjectNode payload = objectMapper.createObjectNode();
                 payload.put("query", request.message());
                 ObjectNode inputs = payload.putObject("inputs");
                 inputs.put("context", context == null ? "" : context);
-                if (StringUtils.hasText(role)) {
-                    inputs.put("user_custom_role", role);
+                if (StringUtils.hasText(roleContent)) {
+                    inputs.put("user_custom_role", roleContent);
                 }
+                int memoryRounds = resolveMemoryRounds(principal.subjectId(), sceneType);
+                addHistoryToInputs(inputs, principal.subjectId(), request.roleId(), sceneType, resolveSessionKey(request.roleId(), request.wechatContact()), memoryRounds);
+                sessionHistoryService.appendMessage(
+                        principal.subjectId(), request.roleId(), sceneType, resolveSessionKey(request.roleId(), request.wechatContact()), "USER", request.message());
                 payload.put("user", "user-" + principal.subjectId());
-                
                 String conversationId = request.conversationId();
-                boolean hasContact = StringUtils.hasText(request.wechatContact());
-                if (hasContact) {
+                if (StringUtils.hasText(request.wechatContact())) {
                     String mappedId = contactConversationMappingService.getConversationId(
-                            principal.subjectId(), request.taskId(), request.wechatContact());
-                    if (StringUtils.hasText(mappedId)) conversationId = mappedId;
+                            principal.subjectId(), request.roleId(), request.wechatContact());
+                    if (StringUtils.hasText(mappedId)) {
+                        conversationId = mappedId;
+                    }
                 }
                 if (StringUtils.hasText(conversationId)) {
                     payload.put("conversation_id", conversationId);
                 }
 
                 DifyClient.DifyChatResult result = difyClient.chatMessages(payload.toString());
-                
-                // Update conversation mapping
                 if (StringUtils.hasText(result.conversationId())) {
                     mappingService.recordConversation(principal.subjectId(), result.conversationId());
-                    if (hasContact) {
+                    if (StringUtils.hasText(request.wechatContact())) {
                         contactConversationMappingService.upsertConversationId(
-                                principal.subjectId(), request.taskId(), request.wechatContact(), result.conversationId());
+                                principal.subjectId(), request.roleId(), request.wechatContact(), result.conversationId());
                     }
                 }
-
-                String answer = result.answer();
-                emitter.send(SseEmitter.event().data(new StepMsg("OUTPUT", answer)));
-                
+                if (StringUtils.hasText(result.answer())) {
+                    sessionHistoryService.appendMessage(
+                            principal.subjectId(), request.roleId(), sceneType, resolveSessionKey(request.roleId(), request.wechatContact()), "AI", result.answer());
+                }
+                emitter.send(SseEmitter.event().data(new StepMsg("OUTPUT", result.answer())));
                 emitter.complete();
             } catch (Exception e) {
                 log.error("Monitor chat stream error", e);
@@ -241,58 +341,7 @@ public class UserDifyController {
                 TenantContext.clear();
             }
         });
-
         return emitter;
-    }
-
-    private String extractDocTitles(String retrieveJson) {
-        if (!StringUtils.hasText(retrieveJson)) return "";
-        try {
-            JsonNode node = objectMapper.readTree(retrieveJson);
-            JsonNode records = node.path("records");
-            if (!records.isArray()) records = node.path("data");
-            if (!records.isArray()) return "";
-
-            Set<String> titles = new LinkedHashSet<>();
-            for (JsonNode record : records) {
-                // Try to find document name in nested structure first
-                JsonNode docNode = record.path("segment").path("document");
-                if (docNode.isMissingNode()) {
-                    // Fallback to direct document node
-                    docNode = record.path("document");
-                }
-                
-                if (docNode.isMissingNode()) continue;
-                
-                String name = "";
-                if (docNode.has("name")) name = docNode.get("name").asText();
-                else if (docNode.has("title")) name = docNode.get("title").asText();
-                
-                if (StringUtils.hasText(name)) {
-                    titles.add("《" + name + "》");
-                }
-                if (titles.size() >= 3) break;
-            }
-            return String.join("、", titles);
-        } catch (Exception e) {
-            log.error("Extract doc titles error", e);
-            return "";
-        }
-    }
-
-    @GetMapping("/tasks/{taskId}/kb")
-    public Result<Map<String, String>> getKnowledgeBase(@PathVariable("taskId") Long taskId) {
-        TransitPrincipal principal = currentPrincipal();
-        TaskEntity task = taskService.getById(principal.subjectId(), taskId);
-        String kbId = task.getKnowledgeBaseId();
-        return Result.success(Map.of("knowledgeBaseId", kbId == null ? "" : kbId));
-    }
-
-    @PutMapping("/tasks/{taskId}/kb")
-    public Result<Void> bindKnowledgeBase(@PathVariable("taskId") Long taskId, @RequestBody BindKnowledgeBaseRequest request) {
-        TransitPrincipal principal = currentPrincipal();
-        taskService.bindKnowledgeBase(principal.subjectId(), taskId, request.knowledgeBaseId());
-        return Result.success(null);
     }
 
     @GetMapping(value = "/datasets/{datasetId}/documents/{documentId}", produces = MediaType.APPLICATION_JSON_VALUE)
@@ -301,31 +350,30 @@ public class UserDifyController {
         return Result.success(objectMapper.readTree(json));
     }
 
-    @PostMapping(
-            value = "/datasets/{datasetId}/document/create-by-file",
-            consumes = MediaType.MULTIPART_FORM_DATA_VALUE,
-            produces = MediaType.APPLICATION_JSON_VALUE)
-    public Result<Object> uploadDocument(
-            @PathVariable("datasetId") String datasetId,
-            @RequestPart("data") String data,
-            @RequestPart("file") MultipartFile file) throws IOException {
+    @PostMapping(value = "/datasets/{datasetId}/document/create-by-file", consumes = MediaType.MULTIPART_FORM_DATA_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    public Result<Object> uploadDocument(@PathVariable("datasetId") String datasetId, @RequestPart("data") String data, @RequestPart("file") MultipartFile file) throws IOException {
         String json = difyClient.uploadDocumentByFile(datasetId, data, file);
         return Result.success(objectMapper.readTree(json));
     }
 
-    @PostMapping(
-            value = "/tasks/{taskId}/kb/document/create-by-file",
-            consumes = MediaType.MULTIPART_FORM_DATA_VALUE,
-            produces = MediaType.APPLICATION_JSON_VALUE)
-    public Result<UploadKnowledgeBaseDocumentResponse> uploadDocumentToTaskKnowledgeBase(
-            @PathVariable("taskId") Long taskId,
-            @RequestPart("data") String data,
+    @PostMapping(value = "/roles/{roleId}/kb/document/create-by-file", consumes = MediaType.MULTIPART_FORM_DATA_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    public Result<UploadKnowledgeBaseDocumentResponse> uploadDocumentToRoleKnowledgeBase(
+            @PathVariable("roleId") Long roleId,
+            @RequestPart(name = "data", required = false) String data,
             @RequestPart("file") MultipartFile file) throws IOException {
         TransitPrincipal principal = currentPrincipal();
-        TaskEntity task = taskService.getById(principal.subjectId(), taskId);
-        String knowledgeBaseId = ensureTaskKnowledgeBase(task);
-        String difyResponseJson = difyClient.uploadDocumentByFile(knowledgeBaseId, data, file);
-        return Result.success(new UploadKnowledgeBaseDocumentResponse(knowledgeBaseId, difyResponseJson));
+        RoleEntity role = roleService.getById(principal.subjectId(), roleId);
+        KnowledgeBaseEntity knowledgeBase = ensureDefaultRoleKnowledgeBase(principal.subjectId(), role);
+        KnowledgeBaseFileEntity uploaded = knowledgeBaseService.uploadFile(principal.subjectId(), knowledgeBase.getId(), data, file);
+        return Result.success(new UploadKnowledgeBaseDocumentResponse(
+                String.valueOf(knowledgeBase.getId()),
+                knowledgeBase.getDifyDatasetId(),
+                uploaded.getDifyDocumentId()));
+    }
+
+    private TransitPrincipal currentPrincipal() {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        return (TransitPrincipal) authentication.getPrincipal();
     }
 
     private String adjustChatRequest(TransitPrincipal principal, String requestJson) throws IOException {
@@ -333,18 +381,13 @@ public class UserDifyController {
         if (!(node instanceof ObjectNode obj)) {
             return requestJson;
         }
-
         if (!obj.hasNonNull("user")) {
             obj.put("user", "user-" + principal.subjectId());
-            log.info("Dify chatMessages set default user userId={}", principal.subjectId());
         }
-
         if (!obj.hasNonNull("conversation_id")) {
             String latest = mappingService.getLatestConversationId(principal.subjectId());
-            if (latest != null && !latest.isBlank()) {
+            if (StringUtils.hasText(latest)) {
                 obj.put("conversation_id", latest);
-                log.info("Dify chatMessages set latest conversation userId={} conversationId={}",
-                        principal.subjectId(), latest);
             }
         }
         return objectMapper.writeValueAsString(obj);
@@ -356,9 +399,7 @@ public class UserDifyController {
             return false;
         }
         String lower = message.toLowerCase();
-        return lower.contains("conversation not exists")
-                || lower.contains("conversation not exist")
-                || lower.contains("conversation not found");
+        return lower.contains("conversation not exists") || lower.contains("conversation not exist") || lower.contains("conversation not found");
     }
 
     private boolean hasConversationId(String requestJson) {
@@ -383,51 +424,134 @@ public class UserDifyController {
         }
     }
 
-    private String buildContextFromRetrieve(String retrieveJson) {
-        if (!StringUtils.hasText(retrieveJson)) {
-            return "";
-        }
-        try {
-            JsonNode node = objectMapper.readTree(retrieveJson);
-            JsonNode records = node.path("records");
-            if (!records.isArray()) {
-                records = node.path("data");
+    private List<String> retrieveFromDatasets(List<String> datasetIds, String query) {
+        List<String> results = new ArrayList<>();
+        for (String datasetId : datasetIds) {
+            if (!StringUtils.hasText(datasetId)) {
+                continue;
             }
-            if (!records.isArray()) {
-                records = node.path("documents");
-            }
-            if (!records.isArray()) {
-                return "";
-            }
-            List<String> segments = new ArrayList<>();
-            for (JsonNode record : records) {
-                String text = extractRecordText(record);
-                if (StringUtils.hasText(text)) {
-                    segments.add(text.trim());
+            try {
+                String retrieveJson = difyClient.retrieveDataset(datasetId, query);
+                if (StringUtils.hasText(retrieveJson)) {
+                    results.add(retrieveJson);
                 }
-                if (segments.size() >= 4) {
-                    break;
+            } catch (Exception ex) {
+                log.warn("Dify retrieve failed datasetId={} error={}", datasetId, ex.getMessage());
+            }
+        }
+        return results;
+    }
+
+    private String buildContextFromRetrieve(List<String> retrieveJsonList) {
+        List<String> segments = new ArrayList<>();
+        double scoreThreshold = getKnowledgeScoreThreshold();
+        for (String retrieveJson : retrieveJsonList) {
+            try {
+                JsonNode node = objectMapper.readTree(retrieveJson);
+                JsonNode records = getRetrieveRecords(node);
+                if (!records.isArray()) {
+                    continue;
+                }
+                for (JsonNode record : records) {
+                    if (!isKnowledgeRecordMatched(record, scoreThreshold)) {
+                        continue;
+                    }
+                    String text = extractRecordText(record);
+                    if (StringUtils.hasText(text)) {
+                        segments.add(text.trim());
+                    }
+                    if (segments.size() >= 8) {
+                        return String.join("\n\n", segments);
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return String.join("\n\n", segments);
+    }
+
+    private String extractDocTitles(List<String> retrieveJsonList) {
+        Set<String> titles = new LinkedHashSet<>();
+        double scoreThreshold = getKnowledgeScoreThreshold();
+        for (String retrieveJson : retrieveJsonList) {
+            try {
+                JsonNode node = objectMapper.readTree(retrieveJson);
+                JsonNode records = getRetrieveRecords(node);
+                if (!records.isArray()) {
+                    continue;
+                }
+                for (JsonNode record : records) {
+                    if (!isKnowledgeRecordMatched(record, scoreThreshold)) {
+                        continue;
+                    }
+                    JsonNode docNode = record.path("segment").path("document");
+                    if (docNode.isMissingNode()) {
+                        docNode = record.path("document");
+                    }
+                    String name = docNode.has("name") ? docNode.get("name").asText() : docNode.path("title").asText();
+                    if (StringUtils.hasText(name)) {
+                        titles.add("《" + name + "》");
+                    }
+                    if (titles.size() >= 5) {
+                        return String.join("、", titles);
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return String.join("、", titles);
+    }
+
+    private JsonNode getRetrieveRecords(JsonNode root) {
+        JsonNode records = root.path("records");
+        if (!records.isArray()) {
+            records = root.path("data");
+        }
+        if (!records.isArray()) {
+            records = root.path("documents");
+        }
+        return records;
+    }
+
+    private double getKnowledgeScoreThreshold() {
+        Double configured = difyProperties.getRetrieveScoreThreshold();
+        if (configured == null) {
+            return 0.6d;
+        }
+        return Math.max(0d, configured);
+    }
+
+    private boolean isKnowledgeRecordMatched(JsonNode record, double threshold) {
+        if (threshold <= 0d) {
+            return true;
+        }
+        Double score = extractRecordScore(record);
+        return score != null && score >= threshold;
+    }
+
+    private Double extractRecordScore(JsonNode record) {
+        String[] paths = new String[]{"/score", "/segment/score", "/metadata/score", "/segment/metadata/score"};
+        for (String path : paths) {
+            JsonNode scoreNode = record.at(path);
+            if (scoreNode == null || scoreNode.isMissingNode() || scoreNode.isNull()) {
+                continue;
+            }
+            if (scoreNode.isNumber()) {
+                return scoreNode.asDouble();
+            }
+            if (scoreNode.isTextual()) {
+                try {
+                    return Double.parseDouble(scoreNode.asText());
+                } catch (NumberFormatException ignored) {
+                    return null;
                 }
             }
-            String context = String.join("\n\n", segments);
-            log.info("MonitorChat context segmentCount={} contextSize={}", segments.size(),
-                    context.length());
-            return context;
-        } catch (Exception ex) {
-            log.info("MonitorChat context build failed error={}", ex.getMessage());
-            return "";
         }
+        return null;
     }
 
     private String extractRecordText(JsonNode record) {
-        String[] paths = new String[]{
-                "/segment/content",
-                "/segment/text",
-                "/content",
-                "/text",
-                "/document/content",
-                "/document/text"
-        };
+        String[] paths = new String[]{"/segment/content", "/segment/text", "/content", "/text", "/document/content", "/document/text"};
         for (String path : paths) {
             JsonNode value = record.at(path);
             if (value != null && value.isTextual() && StringUtils.hasText(value.asText())) {
@@ -437,95 +561,101 @@ public class UserDifyController {
         return "";
     }
 
-    private String buildPrompt(String role, String context, String message) {
-        StringBuilder builder = new StringBuilder();
-        if (StringUtils.hasText(role)) {
-            builder.append("角色设定:\n").append(role.trim()).append("\n\n");
+    private List<String> resolveRoleDatasetIds(Long userId, RoleEntity role) {
+        List<KnowledgeBaseEntity> knowledgeBases = roleKnowledgeBaseService.listRoleKnowledgeBases(userId, role.getId());
+        List<String> datasetIds = new ArrayList<>();
+        for (KnowledgeBaseEntity knowledgeBase : knowledgeBases) {
+            if (StringUtils.hasText(knowledgeBase.getDifyDatasetId())) {
+                datasetIds.add(knowledgeBase.getDifyDatasetId());
+            }
         }
-        if (StringUtils.hasText(context)) {
-            builder.append("知识库内容:\n").append(context.trim()).append("\n\n");
+        if (!datasetIds.isEmpty()) {
+            return datasetIds;
         }
-        if (StringUtils.hasText(message)) {
-            builder.append("对方消息:\n").append(message.trim());
+        if (StringUtils.hasText(role.getKnowledgeBaseId())) {
+            datasetIds.add(role.getKnowledgeBaseId());
+            return datasetIds;
         }
-        return builder.toString();
+        KnowledgeBaseEntity fallback = ensureDefaultRoleKnowledgeBase(userId, role);
+        if (StringUtils.hasText(fallback.getDifyDatasetId())) {
+            datasetIds.add(fallback.getDifyDatasetId());
+        }
+        return datasetIds;
     }
 
-    private TransitPrincipal currentPrincipal() {
-        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
-        return (TransitPrincipal) authentication.getPrincipal();
+    private KnowledgeBaseEntity ensureDefaultRoleKnowledgeBase(Long userId, RoleEntity role) {
+        List<KnowledgeBaseEntity> knowledgeBases = roleKnowledgeBaseService.listRoleKnowledgeBases(userId, role.getId());
+        if (!knowledgeBases.isEmpty()) {
+            return knowledgeBases.get(0);
+        }
+        if (StringUtils.hasText(role.getKnowledgeBaseId())) {
+            KnowledgeBaseEntity existing = knowledgeBaseService.getByDifyDatasetId(userId, role.getKnowledgeBaseId());
+            if (existing != null) {
+                roleKnowledgeBaseService.bindKnowledgeBase(userId, role.getId(), existing.getId());
+                return existing;
+            }
+            KnowledgeBaseEntity createRequest = new KnowledgeBaseEntity();
+            createRequest.setName(buildDatasetName(role));
+            createRequest.setDescription("");
+            createRequest.setPermission("only_me");
+            createRequest.setStatus("ENABLED");
+            createRequest.setDifyDatasetId(role.getKnowledgeBaseId());
+            KnowledgeBaseEntity created = knowledgeBaseService.createByExistingDatasetId(userId, createRequest);
+            roleKnowledgeBaseService.bindKnowledgeBase(userId, role.getId(), created.getId());
+            return created;
+        }
+        KnowledgeBaseEntity createRequest = new KnowledgeBaseEntity();
+        createRequest.setName(buildDatasetName(role));
+        createRequest.setDescription("");
+        createRequest.setPermission("only_me");
+        createRequest.setStatus("ENABLED");
+        KnowledgeBaseEntity created = knowledgeBaseService.create(userId, createRequest);
+        roleKnowledgeBaseService.bindKnowledgeBase(userId, role.getId(), created.getId());
+        return created;
     }
 
-    private String ensureTaskKnowledgeBase(TaskEntity task) {
-        String existing = task.getKnowledgeBaseId();
-        if (existing != null && !existing.isBlank()) {
-            log.info("KnowledgeBase reuse taskId={} datasetId={}", task.getId(), existing);
-            return existing;
+    private String buildDatasetName(RoleEntity role) {
+        String name = role.getName();
+        if (!StringUtils.hasText(name)) {
+            throw new IllegalArgumentException("Role name required");
         }
+        return role.getId() + "_" + name.trim();
+    }
 
-        String datasetName = buildDatasetName(task);
-        String datasetId = null;
-        try {
-            DifyClient.DifyDatasetResult created = difyClient.createDataset(datasetName);
-            datasetId = created.datasetId();
-        } catch (TransitException ex) {
-            if (ex.getMessage() != null && (ex.getMessage().contains("409") || ex.getMessage().contains("already exists"))) {
-                log.info("KnowledgeBase create conflict, trying to find existing taskId={} datasetName={}", task.getId(), datasetName);
-                datasetId = findDatasetIdByName(datasetName);
+    private void addHistoryToInputs(
+            ObjectNode inputs, Long userId, Long roleId, String sceneType, String sessionKey, int memoryRounds) {
+        List<SessionHistoryService.HistoryInputItem> history = sessionHistoryService.buildDifyHistory(
+                userId, roleId, sceneType, sessionKey, memoryRounds);
+        StringBuilder sb = new StringBuilder();
+        for (SessionHistoryService.HistoryInputItem item : history) {
+            if ("user".equalsIgnoreCase(item.role())) {
+                sb.append("用户: ").append(item.content()).append("\n");
             } else {
-                throw ex;
+                sb.append("回复: ").append(item.content()).append("\n");
             }
         }
+        inputs.put("history", sb.toString());
+    }
 
-        if (datasetId == null || datasetId.isBlank()) {
-            log.info("KnowledgeBase create failed taskId={} datasetName={}", task.getId(), datasetName);
-            throw new IllegalStateException("Failed to create or find knowledge base");
+    private int resolveMemoryRounds(Long userId, String sceneType) {
+        SessionConfigService.SessionConfigView view = sessionConfigService.getConfig(userId, sceneType);
+        if (view == null || view.sceneConfig() == null || view.sceneConfig().memoryRounds() == null) {
+            return 5;
         }
-        taskService.bindKnowledgeBase(task.getUserId(), task.getId(), datasetId);
-        log.info("KnowledgeBase created/bound taskId={} datasetId={}", task.getId(), datasetId);
-        return datasetId;
+        return Math.max(view.sceneConfig().memoryRounds(), 1);
     }
 
-    private String findDatasetIdByName(String name) {
-        int page = 1;
-        int limit = 20;
-        for (int i = 0; i < 50; i++) {
-            DifyClient.DifyDatasetListResult result = difyClient.getDatasets(page, limit);
-            if (result.data() == null || result.data().isEmpty()) {
-                return null;
-            }
-            for (DifyClient.DifyDatasetItem item : result.data()) {
-                if (name.equals(item.name())) {
-                    return item.id();
-                }
-            }
-            if (!result.hasMore()) {
-                return null;
-            }
-            page++;
+    private String resolveSessionKey(Long roleId, String wechatContact) {
+        if (StringUtils.hasText(wechatContact)) {
+            return wechatContact.trim();
         }
-        return null;
+        return "role-" + roleId;
     }
 
-    private String buildDatasetName(TaskEntity task) {
-        String name = task.getName();
-        if (name == null || name.isBlank()) {
-            throw new IllegalArgumentException("Task name required");
-        }
-        if (name.length() > 15) {
-            throw new IllegalArgumentException("Task name length must be <= 15");
-        }
-        return task.getId() + "_" + name;
+    public record UploadKnowledgeBaseDocumentResponse(String knowledgeBaseId, String difyDatasetId, String difyDocumentId) {
     }
 
-    public record BindKnowledgeBaseRequest(String knowledgeBaseId) {
-    }
-
-    public record UploadKnowledgeBaseDocumentResponse(String knowledgeBaseId, String difyResponseJson) {
-    }
-
-    public record MonitorChatRequest(Long taskId, String message, String role, String conversationId,
-                                     String wechatContact) {
+    public record MonitorChatRequest(Long roleId, String message, String role, String conversationId, String wechatContact, String roomType) {
     }
 
     public record StepMsg(String step, String content) {

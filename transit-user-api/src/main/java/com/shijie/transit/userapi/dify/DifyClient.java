@@ -48,11 +48,15 @@ public class DifyClient {
   }
 
   public DifyDatasetResult createDataset(String name) {
+    return createDataset(name, "only_me");
+  }
+
+  public DifyDatasetResult createDataset(String name, String permission) {
     try {
-      log.info("Dify createDataset name={}", name);
+      log.info("Dify createDataset name={} permission={}", name, permission);
       ObjectNode request = objectMapper.createObjectNode();
       request.put("name", name);
-      request.put("permission", "only_me");
+      request.put("permission", StringUtils.hasText(permission) ? permission : "only_me");
 
       String responseJson = restClientForDataset().post()
           .uri("/v1/datasets")
@@ -95,6 +99,21 @@ public class DifyClient {
     }
   }
 
+  public String listDocuments(String datasetId, int page, int limit) {
+    try {
+      log.info("Dify listDocuments datasetId={} page={} limit={}", datasetId, page, limit);
+      return restClientForDataset().get()
+          .uri(uriBuilder -> uriBuilder.path("/v1/datasets/{datasetId}/documents")
+              .queryParam("page", page)
+              .queryParam("limit", limit)
+              .build(datasetId))
+          .retrieve()
+          .body(String.class);
+    } catch (RestClientResponseException ex) {
+      throw toTransitException(ex);
+    }
+  }
+
   public String uploadDocumentByFile(String datasetId, String dataJson, MultipartFile file) throws IOException {
     MultiValueMap<String, Object> multipartBody = new LinkedMultiValueMap<>();
     multipartBody.add("data", dataJson);
@@ -124,20 +143,6 @@ public class DifyClient {
       ObjectNode request = objectMapper.createObjectNode();
       request.put("query", query);
 
-//      ObjectNode retrievalModel = objectMapper.createObjectNode();
-//      retrievalModel.put("search_method", "keyword_search");
-//      retrievalModel.put("reranking_enable", false);
-//      retrievalModel.putNull("reranking_mode");
-//      ObjectNode rerankingModel = objectMapper.createObjectNode();
-//      rerankingModel.put("reranking_provider_name", "");
-//      rerankingModel.put("reranking_model_name", "");
-//      retrievalModel.set("reranking_model", rerankingModel);
-//      retrievalModel.putNull("weights");
-//      retrievalModel.put("top_k", 3);
-//      retrievalModel.put("score_threshold_enabled", false);
-//      retrievalModel.putNull("score_threshold");
-//      request.set("retrieval_model", retrievalModel);
-
       return restClientForDataset().post()
           .uri("/v1/datasets/{datasetId}/retrieve", datasetId)
           .contentType(MediaType.APPLICATION_JSON)
@@ -147,6 +152,108 @@ public class DifyClient {
     } catch (RestClientResponseException ex) {
       throw toTransitException(ex);
     }
+  }
+
+  public void deleteDocument(String datasetId, String documentId) {
+    try {
+      log.info("Dify deleteDocument datasetId={} documentId={}", datasetId, documentId);
+      restClientForDataset().delete()
+          .uri("/v1/datasets/{datasetId}/documents/{documentId}", datasetId, documentId)
+          .retrieve()
+          .toBodilessEntity();
+    } catch (RestClientResponseException ex) {
+      throw toTransitException(ex);
+    }
+  }
+
+  public void deleteDataset(String datasetId) {
+    try {
+      log.info("Dify deleteDataset datasetId={}", datasetId);
+      restClientForDataset().delete()
+          .uri("/v1/datasets/{datasetId}", datasetId)
+          .retrieve()
+          .toBodilessEntity();
+    } catch (RestClientResponseException ex) {
+      throw toTransitException(ex);
+    }
+  }
+
+  public void updateDataset(String datasetId, String name, String permission) {
+    try {
+      log.info("Dify updateDataset datasetId={} name={} permission={}", datasetId, name, permission);
+      ObjectNode request = objectMapper.createObjectNode();
+      if (StringUtils.hasText(name)) {
+        request.put("name", name);
+      }
+      if (StringUtils.hasText(permission)) {
+        request.put("permission", permission);
+      }
+
+      restClientForDataset().patch()
+          .uri("/v1/datasets/{datasetId}", datasetId)
+          .contentType(MediaType.APPLICATION_JSON)
+          .body(request.toString())
+          .retrieve()
+          .toBodilessEntity();
+    } catch (RestClientResponseException ex) {
+      throw toTransitException(ex);
+    }
+  }
+
+  public String runWorkflow(String apiKey, ObjectNode inputs, String user) {
+    try {
+      log.info("Dify runWorkflow user={}", user);
+      ObjectNode request = objectMapper.createObjectNode();
+      request.set("inputs", inputs);
+      request.put("response_mode", "blocking");
+      request.put("user", user);
+
+      String responseJson = restClient(apiKey).post()
+          .uri("/v1/workflows/run")
+          .contentType(MediaType.APPLICATION_JSON)
+          .body(request.toString())
+          .retrieve()
+          .body(String.class);
+      
+      log.info("Dify runWorkflow responseSize={}", responseJson == null ? 0 : responseJson.length());
+      
+      if (responseJson == null) {
+        return null;
+      }
+      
+      JsonNode root = objectMapper.readTree(responseJson);
+      if (root.hasNonNull("data") && root.get("data").hasNonNull("outputs")) {
+        JsonNode outputs = root.get("data").get("outputs");
+        if (outputs.hasNonNull("text")) {
+            return outputs.get("text").asText();
+        } else if (outputs.hasNonNull("result")) {
+            return outputs.get("result").asText();
+        } else {
+             // Fallback: return the whole outputs as string if we can't find specific field
+             return outputs.toString();
+        }
+      }
+      return null;
+    } catch (Exception ex) {
+      if (ex instanceof RestClientResponseException rex) {
+          throw toTransitException(rex);
+      }
+      throw new RuntimeException("Failed to run workflow", ex);
+    }
+  }
+
+  private RestClient restClient(String apiKey) {
+    String baseUrl = properties.getBaseUrl();
+    if (!StringUtils.hasText(baseUrl)) {
+      throw new TransitException(ErrorCode.INTERNAL_ERROR, "DIFY_BASE_URL 未配置");
+    }
+    if (!StringUtils.hasText(apiKey)) {
+      throw new TransitException(ErrorCode.UNAUTHORIZED, "DIFY_API_KEY (Workflow) 未配置");
+    }
+    return RestClient.builder()
+        .baseUrl(baseUrl)
+        .defaultHeader("Authorization", "Bearer " + apiKey)
+        .build();
   }
 
   private RestClient restClientForChat() {

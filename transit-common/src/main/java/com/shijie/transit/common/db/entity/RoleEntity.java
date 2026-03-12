@@ -1,13 +1,16 @@
 package com.shijie.transit.common.db.entity;
 
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
 
 /**
- * 用户任务表
+ * 用户角色表
  */
-@TableName("task")
-public class TaskEntity extends BaseTenantEntity {
+@TableName("role")
+public class RoleEntity extends BaseTenantEntity {
 
+    @JsonSerialize(using = ToStringSerializer.class)
     private Long userId;
 
     private String name;
@@ -16,8 +19,7 @@ public class TaskEntity extends BaseTenantEntity {
 
     private String status; // PENDING, RUNNING, COMPLETED, FAILED
 
-    private String type; // DEFAULT
-
+    @JsonSerialize(using = ToStringSerializer.class)
     private Long promptTemplateId;
 
     private String knowledgeBaseId;
@@ -52,14 +54,6 @@ public class TaskEntity extends BaseTenantEntity {
 
     public void setStatus(String status) {
         this.status = status;
-    }
-
-    public String getType() {
-        return type;
-    }
-
-    public void setType(String type) {
-        this.type = type;
     }
 
     public Long getPromptTemplateId() {

@@ -20,6 +20,9 @@ public class WeChatBridgeMessage {
     @JsonProperty("ui_id")
     private String uiId;
 
+    @JsonProperty("room_type")
+    private String roomType; // "GROUP" or "SINGLE"
+
     // Getters and Setters
     public String getType() { return type; }
     public void setType(String type) { this.type = type; }
@@ -41,6 +44,9 @@ public class WeChatBridgeMessage {
 
     public String getUiId() { return uiId; }
     public void setUiId(String uiId) { this.uiId = uiId; }
+
+    public String getRoomType() { return roomType; }
+    public void setRoomType(String roomType) { this.roomType = roomType; }
 
     @Override
     public String toString() {

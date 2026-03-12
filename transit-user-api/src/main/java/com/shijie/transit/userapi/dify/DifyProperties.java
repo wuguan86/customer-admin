@@ -7,6 +7,8 @@ public class DifyProperties {
   private String baseUrl;
   private String chatApiKey;
   private String datasetApiKey;
+  private String commentWorkflowApiKey;
+  private Double retrieveScoreThreshold = 0.6d;
 
   public String getBaseUrl() {
     return baseUrl;
@@ -30,5 +32,21 @@ public class DifyProperties {
 
   public void setDatasetApiKey(String datasetApiKey) {
     this.datasetApiKey = datasetApiKey;
+  }
+
+  public String getCommentWorkflowApiKey() {
+    return commentWorkflowApiKey;
+  }
+
+  public void setCommentWorkflowApiKey(String commentWorkflowApiKey) {
+    this.commentWorkflowApiKey = commentWorkflowApiKey;
+  }
+
+  public Double getRetrieveScoreThreshold() {
+    return retrieveScoreThreshold;
+  }
+
+  public void setRetrieveScoreThreshold(Double retrieveScoreThreshold) {
+    this.retrieveScoreThreshold = retrieveScoreThreshold;
   }
 }

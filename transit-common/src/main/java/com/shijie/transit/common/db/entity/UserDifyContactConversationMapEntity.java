@@ -6,7 +6,7 @@ import java.time.LocalDateTime;
 @TableName("user_dify_contact_conversation_map")
 public class UserDifyContactConversationMapEntity extends BaseTenantEntity {
   private Long userId;
-  private Long taskId;
+  private Long roleId;
   private String wechatContact;
   private String difyConversationId;
   private LocalDateTime lastUsedAt;
@@ -19,12 +19,12 @@ public class UserDifyContactConversationMapEntity extends BaseTenantEntity {
     this.userId = userId;
   }
 
-  public Long getTaskId() {
-    return taskId;
+  public Long getRoleId() {
+    return roleId;
   }
 
-  public void setTaskId(Long taskId) {
-    this.taskId = taskId;
+  public void setRoleId(Long roleId) {
+    this.roleId = roleId;
   }
 
   public String getWechatContact() {

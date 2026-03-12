@@ -20,14 +20,14 @@ public class DifyContactConversationMappingService {
     this.clock = clock;
   }
 
-  public String getConversationId(long userId, long taskId, String wechatContact) {
-    if (taskId <= 0 || !StringUtils.hasText(wechatContact)) {
+  public String getConversationId(long userId, long roleId, String wechatContact) {
+    if (roleId <= 0 || !StringUtils.hasText(wechatContact)) {
       return null;
     }
     UserDifyContactConversationMapEntity existing = mapper.selectOne(
         new LambdaQueryWrapper<UserDifyContactConversationMapEntity>()
             .eq(UserDifyContactConversationMapEntity::getUserId, userId)
-            .eq(UserDifyContactConversationMapEntity::getTaskId, taskId)
+            .eq(UserDifyContactConversationMapEntity::getRoleId, roleId)
             .eq(UserDifyContactConversationMapEntity::getWechatContact, wechatContact.trim())
             .orderByDesc(UserDifyContactConversationMapEntity::getLastUsedAt)
             .last("limit 1"));
@@ -35,22 +35,22 @@ public class DifyContactConversationMappingService {
   }
 
   @Transactional
-  public void upsertConversationId(long userId, long taskId, String wechatContact, String conversationId) {
-    if (taskId <= 0 || !StringUtils.hasText(wechatContact) || !StringUtils.hasText(conversationId)) {
+  public void upsertConversationId(long userId, long roleId, String wechatContact, String conversationId) {
+    if (roleId <= 0 || !StringUtils.hasText(wechatContact) || !StringUtils.hasText(conversationId)) {
       return;
     }
     String contact = wechatContact.trim();
     UserDifyContactConversationMapEntity existing = mapper.selectOne(
         new LambdaQueryWrapper<UserDifyContactConversationMapEntity>()
             .eq(UserDifyContactConversationMapEntity::getUserId, userId)
-            .eq(UserDifyContactConversationMapEntity::getTaskId, taskId)
+            .eq(UserDifyContactConversationMapEntity::getRoleId, roleId)
             .eq(UserDifyContactConversationMapEntity::getWechatContact, contact)
             .last("limit 1"));
     if (existing == null) {
       UserDifyContactConversationMapEntity entity = new UserDifyContactConversationMapEntity();
       entity.setTenantId(TenantContext.getTenantId());
       entity.setUserId(userId);
-      entity.setTaskId(taskId);
+      entity.setRoleId(roleId);
       entity.setWechatContact(contact);
       entity.setDifyConversationId(conversationId);
       entity.setLastUsedAt(LocalDateTime.now(clock));
