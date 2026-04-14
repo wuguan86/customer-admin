@@ -20,8 +20,10 @@ import java.util.List;
 @Service
 public class KnowledgeBaseService {
   private static final String DEFAULT_SEARCH_METHOD = "hybrid_search";
-  private static final int DEFAULT_TOP_K = 5;
-  private static final double DEFAULT_SCORE_THRESHOLD = 0.5d;
+  private static final int DEFAULT_TOP_K = 3;
+  private static final double DEFAULT_SCORE_THRESHOLD = 0.35d;
+  private static final String DEFAULT_RERANK_PROVIDER = "tongyi";
+  private static final String DEFAULT_RERANK_MODEL = "gte-rerank-v2";
   private final KnowledgeBaseMapper knowledgeBaseMapper;
   private final KnowledgeBaseFileMapper knowledgeBaseFileMapper;
   private final RoleKnowledgeBaseService roleKnowledgeBaseService;
@@ -83,7 +85,9 @@ public class KnowledgeBaseService {
         true,
         DEFAULT_TOP_K,
         true,
-        DEFAULT_SCORE_THRESHOLD);
+        DEFAULT_SCORE_THRESHOLD,
+        DEFAULT_RERANK_PROVIDER,
+        DEFAULT_RERANK_MODEL);
     KnowledgeBaseEntity entity = new KnowledgeBaseEntity();
     entity.setTenantId(TenantContext.getTenantId());
     entity.setUserId(userId);

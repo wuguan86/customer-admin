@@ -2,6 +2,8 @@ package com.shijie.transit.common.web;
 
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Clock;
+import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,6 +13,7 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.validation.BindException;
 import org.springframework.validation.FieldError;
+import org.springframework.web.context.request.async.AsyncRequestTimeoutException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -25,6 +28,13 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
   private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+  private static final List<String> CLIENT_DISCONNECT_MESSAGES = List.of(
+      "broken pipe",
+      "connection reset",
+      "an established connection was aborted by the software in your host machine",
+      "an existing connection was forcibly closed by the remote host",
+      "你的主机中的软件中止了一个已建立的连接",
+      "远程主机强迫关闭了一个现有的连接");
   private final Clock clock;
 
   public GlobalExceptionHandler(Clock clock) {
@@ -73,8 +83,18 @@ public class GlobalExceptionHandler {
     return ResponseEntity.status(ErrorCode.FORBIDDEN.httpStatus()).body(body);
   }
 
+  @ExceptionHandler(AsyncRequestTimeoutException.class)
+  public ResponseEntity<Void> handleAsyncRequestTimeout(AsyncRequestTimeoutException ex, HttpServletRequest request) {
+    log.warn("AsyncRequestTimeoutException path={} message={}", request.getRequestURI(), ex.getMessage(), ex);
+    return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build();
+  }
+
   @ExceptionHandler(Exception.class)
-  public ResponseEntity<Result<Void>> handleOther(Exception ex) {
+  public ResponseEntity<?> handleOther(Exception ex, HttpServletRequest request) {
+    if (isClientDisconnect(ex)) {
+      log.info("客户端已主动断开连接 path={} message={}", request.getRequestURI(), ex.getMessage());
+      return ResponseEntity.status(HttpStatus.NO_CONTENT).build();
+    }
     log.error("UnhandledException message={}", ex.getMessage(), ex);
     Result<Void> body =
         Result.error(ErrorCode.INTERNAL_ERROR, HttpStatus.INTERNAL_SERVER_ERROR.getReasonPhrase(), clock.millis(), null);
@@ -83,5 +103,26 @@ public class GlobalExceptionHandler {
 
   private String firstFieldErrorMessage(FieldError fieldError) {
     return Optional.ofNullable(fieldError).map(FieldError::getDefaultMessage).orElse(null);
+  }
+
+  private boolean isClientDisconnect(Throwable throwable) {
+    Throwable current = throwable;
+    while (current != null) {
+      String simpleName = current.getClass().getSimpleName();
+      if ("ClientAbortException".equals(simpleName) || "AsyncRequestNotUsableException".equals(simpleName)) {
+        return true;
+      }
+      String message = current.getMessage();
+      if (message != null) {
+        String normalizedMessage = message.toLowerCase(Locale.ROOT);
+        for (String keyword : CLIENT_DISCONNECT_MESSAGES) {
+          if (normalizedMessage.contains(keyword.toLowerCase(Locale.ROOT))) {
+            return true;
+          }
+        }
+      }
+      current = current.getCause();
+    }
+    return false;
   }
 }

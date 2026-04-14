@@ -35,6 +35,7 @@ public class JwtService {
         .expiration(Date.from(exp))
         .claim("tenantId", claims.tenantId())
         .claim("type", claims.type())
+        .claim("sessionId", claims.sessionId())
         .signWith(secretKey, SignatureAlgorithm.HS256)
         .compact();
   }
@@ -50,15 +51,20 @@ public class JwtService {
     String subject = claims.getSubject();
     Object tenantIdObj = claims.get("tenantId");
     Object typeObj = claims.get("type");
+    Object sessionIdObj = claims.get("sessionId");
 
-    if (!StringUtils.hasText(subject) || tenantIdObj == null || typeObj == null) {
+    if (!StringUtils.hasText(subject) || tenantIdObj == null || typeObj == null || sessionIdObj == null) {
       throw new IllegalArgumentException("JWT claims missing");
     }
 
     long subjectId = Long.parseLong(subject);
     long tenantId = ((Number) tenantIdObj).longValue();
     String type = String.valueOf(typeObj);
-    return new TransitJwtClaims(subjectId, tenantId, type);
+    String sessionId = String.valueOf(sessionIdObj);
+    if (!StringUtils.hasText(sessionId)) {
+      throw new IllegalArgumentException("JWT sessionId missing");
+    }
+    return new TransitJwtClaims(subjectId, tenantId, type, sessionId);
   }
 
   private SecretKey buildSecretKey(String secret) {

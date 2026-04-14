@@ -5,6 +5,7 @@ import com.shijie.transit.adminapi.mapper.AdminUserMapper;
 import com.shijie.transit.common.db.entity.AdminUserEntity;
 import com.shijie.transit.common.security.JwtService;
 import com.shijie.transit.common.security.TransitJwtClaims;
+import java.util.UUID;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -34,7 +35,8 @@ public class AdminAuthService {
     if (!passwordEncoder.matches(password, user.getPasswordHash())) {
       throw new IllegalArgumentException("invalid credentials");
     }
-    String token = jwtService.issueToken(new TransitJwtClaims(user.getId(), user.getTenantId(), "ADMIN"));
+    String adminSessionId = UUID.randomUUID().toString().replace("-", "");
+    String token = jwtService.issueToken(new TransitJwtClaims(user.getId(), user.getTenantId(), "ADMIN", adminSessionId));
     return new LoginResult(token, user.getId(), user.getTenantId(), user.getDisplayName());
   }
 

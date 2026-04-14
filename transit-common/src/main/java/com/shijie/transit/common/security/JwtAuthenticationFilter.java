@@ -1,5 +1,6 @@
 package com.shijie.transit.common.security;
 
+import com.shijie.transit.common.tenant.TenantContext;
 import com.shijie.transit.common.web.ApiErrorWriter;
 import com.shijie.transit.common.web.ErrorCode;
 import jakarta.servlet.FilterChain;
@@ -16,8 +17,10 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
+  public static final String REQUEST_ATTR_SESSION_ID = "transit.sessionId";
   private final JwtService jwtService;
   private final ApiErrorWriter apiErrorWriter;
+  private final UserSessionValidator userSessionValidator;
   private final String expectedType;
   private final String protectedPathPrefix;
   private final List<String> permitPathPrefixes;
@@ -25,11 +28,13 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
   public JwtAuthenticationFilter(
       JwtService jwtService,
       ApiErrorWriter apiErrorWriter,
+      UserSessionValidator userSessionValidator,
       String expectedType,
       String protectedPathPrefix,
       List<String> permitPathPrefixes) {
     this.jwtService = jwtService;
     this.apiErrorWriter = apiErrorWriter;
+    this.userSessionValidator = userSessionValidator;
     this.expectedType = expectedType;
     this.protectedPathPrefix = protectedPathPrefix;
     this.permitPathPrefixes = permitPathPrefixes;
@@ -68,6 +73,20 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
       apiErrorWriter.write(response, ErrorCode.UNAUTHORIZED, "Token type mismatch");
       return;
     }
+    if ("USER".equalsIgnoreCase(expectedType) && userSessionValidator != null) {
+      boolean valid;
+      TenantContext.setTenantId(claims.tenantId());
+      try {
+        valid = userSessionValidator.isSessionValid(claims.tenantId(), claims.subjectId(), claims.sessionId());
+      } finally {
+        TenantContext.clear();
+      }
+      if (!valid) {
+        apiErrorWriter.write(response, ErrorCode.UNAUTHORIZED, "登录会话已失效，请重新登录");
+        return;
+      }
+    }
+    request.setAttribute(REQUEST_ATTR_SESSION_ID, claims.sessionId());
 
     TransitPrincipal principal = new TransitPrincipal(claims.subjectId(), claims.tenantId(), claims.type());
     SimpleGrantedAuthority authority = new SimpleGrantedAuthority("ROLE_" + expectedType.toUpperCase());

@@ -2,6 +2,7 @@ package com.shijie.transit.api.config;
 
 import com.shijie.transit.common.security.JwtAuthenticationFilter;
 import com.shijie.transit.common.security.JwtService;
+import com.shijie.transit.common.security.UserSessionValidator;
 import com.shijie.transit.common.web.ApiErrorWriter;
 import java.util.List;
 import org.springframework.context.annotation.Bean;
@@ -31,12 +32,17 @@ public class SecurityConfiguration {
 
   @Bean
   @Order(1)
-  public SecurityFilterChain userSecurityFilterChain(HttpSecurity http, JwtService jwtService, ApiErrorWriter apiErrorWriter)
+  public SecurityFilterChain userSecurityFilterChain(
+      HttpSecurity http,
+      JwtService jwtService,
+      ApiErrorWriter apiErrorWriter,
+      UserSessionValidator userSessionValidator)
       throws Exception {
     JwtAuthenticationFilter jwtFilter =
         new JwtAuthenticationFilter(
             jwtService,
             apiErrorWriter,
+            userSessionValidator,
             "USER",
             "/api/user",
             List.of(
@@ -61,7 +67,7 @@ public class SecurityConfiguration {
   public SecurityFilterChain adminSecurityFilterChain(HttpSecurity http, JwtService jwtService, ApiErrorWriter apiErrorWriter)
       throws Exception {
     JwtAuthenticationFilter jwtFilter =
-        new JwtAuthenticationFilter(jwtService, apiErrorWriter, "ADMIN", "/api/admin", List.of("/api/admin/auth"));
+        new JwtAuthenticationFilter(jwtService, apiErrorWriter, null, "ADMIN", "/api/admin", List.of("/api/admin/auth"));
 
     http.securityMatcher("/api/admin/**");
     http.csrf(csrf -> csrf.disable());

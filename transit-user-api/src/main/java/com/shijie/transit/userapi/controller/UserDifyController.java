@@ -2,18 +2,19 @@ package com.shijie.transit.userapi.controller;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.shijie.transit.common.db.entity.KnowledgeBaseEntity;
 import com.shijie.transit.common.db.entity.KnowledgeBaseFileEntity;
 import com.shijie.transit.common.db.entity.RoleEntity;
 import com.shijie.transit.common.security.TransitPrincipal;
 import com.shijie.transit.common.tenant.TenantContext;
+import com.shijie.transit.common.web.ErrorCode;
 import com.shijie.transit.common.web.Result;
 import com.shijie.transit.common.web.TransitException;
 import com.shijie.transit.userapi.dify.DifyClient;
 import com.shijie.transit.userapi.dify.DifyProperties;
 import com.shijie.transit.userapi.service.DifyContactConversationMappingService;
-import com.shijie.transit.userapi.service.DifyMappingService;
 import com.shijie.transit.userapi.service.KnowledgeBaseService;
 import com.shijie.transit.userapi.service.RoleKnowledgeBaseService;
 import com.shijie.transit.userapi.service.RoleService;
@@ -43,17 +44,26 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @RestController
 @RequestMapping("/api/user/dify")
 public class UserDifyController {
     private static final Logger log = LoggerFactory.getLogger(UserDifyController.class);
+    private static final Pattern IMAGE_DATA_URL_PATTERN = Pattern.compile("^data:(image/[a-zA-Z0-9.+-]+);base64,(.+)$", Pattern.DOTALL);
+    private static final int MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+    private static final long DIFY_WAIT_HEARTBEAT_MS = 15000L;
     private final DifyClient difyClient;
-    private final DifyMappingService mappingService;
     private final DifyContactConversationMappingService contactConversationMappingService;
     private final RoleService roleService;
     private final RoleKnowledgeBaseService roleKnowledgeBaseService;
@@ -67,7 +77,6 @@ public class UserDifyController {
 
     public UserDifyController(
             DifyClient difyClient,
-            DifyMappingService mappingService,
             DifyContactConversationMappingService contactConversationMappingService,
             RoleService roleService,
             RoleKnowledgeBaseService roleKnowledgeBaseService,
@@ -79,7 +88,6 @@ public class UserDifyController {
             DifyProperties difyProperties,
             ObjectMapper objectMapper) {
         this.difyClient = difyClient;
-        this.mappingService = mappingService;
         this.contactConversationMappingService = contactConversationMappingService;
         this.roleService = roleService;
         this.roleKnowledgeBaseService = roleKnowledgeBaseService;
@@ -90,26 +98,6 @@ public class UserDifyController {
         this.membershipQueryService = membershipQueryService;
         this.difyProperties = difyProperties;
         this.objectMapper = objectMapper;
-    }
-
-    @PostMapping(value = "/chat-messages", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
-    public Result<Object> chatMessages(@RequestBody String requestJson) throws IOException {
-        TransitPrincipal principal = currentPrincipal();
-        String adjusted = adjustChatRequest(principal, requestJson);
-        DifyClient.DifyChatResult result;
-        try {
-            result = difyClient.chatMessages(adjusted);
-        } catch (TransitException ex) {
-            if (isInvalidConversation(ex) && hasConversationId(adjusted)) {
-                result = difyClient.chatMessages(stripConversationId(adjusted));
-            } else {
-                throw ex;
-            }
-        }
-        if (StringUtils.hasText(result.conversationId())) {
-            mappingService.recordConversation(principal.subjectId(), result.conversationId());
-        }
-        return Result.success(objectMapper.readTree(result.rawJson()));
     }
 
     @PostMapping(value = "/monitor-chat", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
@@ -156,23 +144,11 @@ public class UserDifyController {
             payload.put("conversation_id", request.conversationId());
         }
 
-        DifyClient.DifyChatResult result;
-        try {
-            result = difyClient.chatMessages(payload.toString());
-        } catch (TransitException ex) {
-            if (isInvalidConversation(ex) && payload.hasNonNull("conversation_id")) {
-                payload.remove("conversation_id");
-                result = difyClient.chatMessages(payload.toString());
-            } else {
-                throw ex;
-            }
-        }
-        if (StringUtils.hasText(result.conversationId())) {
-            mappingService.recordConversation(principal.subjectId(), result.conversationId());
-            if (StringUtils.hasText(request.wechatContact())) {
-                contactConversationMappingService.upsertConversationId(
-                        principal.subjectId(), request.roleId(), request.wechatContact(), result.conversationId());
-            }
+        DifyClient.DifyChatResult result = executeChatWithImageFallback(
+                payload, principal.subjectId(), request.imageDataUrl(), true, "monitor-chat-" + principal.subjectId());
+        if (StringUtils.hasText(result.conversationId()) && StringUtils.hasText(request.wechatContact())) {
+            contactConversationMappingService.upsertConversationId(
+                    principal.subjectId(), request.roleId(), request.wechatContact(), result.conversationId());
         }
         String normalizedAnswer = normalizeStreamingAnswer(result.answer());
         if (StringUtils.hasText(normalizedAnswer)) {
@@ -188,14 +164,27 @@ public class UserDifyController {
 
     @PostMapping(value = "/monitor-chat/stream")
     public SseEmitter monitorChatStream(@RequestBody MonitorChatRequest request) {
-        SseEmitter emitter = new SseEmitter(180000L);
+        SseEmitter emitter = new SseEmitter(Duration.ofMinutes(5).toMillis());
         TransitPrincipal principal = currentPrincipal();
         Long tenantId = TenantContext.getTenantId();
+        String streamTraceId = "stream-" + principal.subjectId() + "-" + System.currentTimeMillis();
+        emitter.onTimeout(() -> {
+            log.warn("monitorChatStream 超时结束 traceId={}", streamTraceId);
+            emitter.complete();
+        });
+        emitter.onCompletion(() -> log.info("monitorChatStream 连接结束 traceId={}", streamTraceId));
+        emitter.onError(ex -> log.error("monitorChatStream 连接异常 traceId={}", streamTraceId, ex));
 
         CompletableFuture.runAsync(() -> {
             try {
                 TenantContext.setTenantId(tenantId);
+                log.info("monitorChatStream 开始 traceId={} roleId={} contact={} hasImage={}",
+                        streamTraceId,
+                        request == null ? null : request.roleId(),
+                        request == null ? null : request.wechatContact(),
+                        request != null && StringUtils.hasText(request.imageDataUrl()));
                 if (request == null || !StringUtils.hasText(request.message()) || request.roleId() == null) {
+                    log.warn("monitorChatStream 非法请求 traceId={}", streamTraceId);
                     emitter.completeWithError(new IllegalArgumentException("Invalid request"));
                     return;
                 }
@@ -205,6 +194,7 @@ public class UserDifyController {
                 int totalPoints = Math.max(0, snapshot.subscriptionPoints() != null ? snapshot.subscriptionPoints() : 0) 
                                 + Math.max(0, snapshot.packagePoints() != null ? snapshot.packagePoints() : 0);
                 if (totalPoints <= 0) {
+                    log.info("monitorChatStream 积分不足 traceId={} userId={}", streamTraceId, principal.subjectId());
                     emitter.send(SseEmitter.event().data(new StepMsg("LOGIC", "积分不足，无法发起对话。请前往“我的”页面充值或升级会员。")));
                     emitter.complete();
                     return;
@@ -327,6 +317,8 @@ public class UserDifyController {
 
                 List<String> datasetIds = resolveRoleDatasetIds(principal.subjectId(), role);
                 List<String> retrieveResults = retrieveFromDatasets(datasetIds, request.message());
+                log.info("monitorChatStream 检索完成 traceId={} datasetCount={} retrieveCount={}",
+                        streamTraceId, datasetIds.size(), retrieveResults.size());
                 String docTitles = extractDocTitles(retrieveResults);
                 String knowledgeMsg = StringUtils.hasText(docTitles) ? "检索知识库... 匹配到 " + docTitles + " 。" : "检索知识库... 未匹配到相关文档。";
                 emitter.send(SseEmitter.event().data(new StepMsg("KNOWLEDGE", knowledgeMsg)));
@@ -361,29 +353,38 @@ public class UserDifyController {
                     payload.put("conversation_id", conversationId);
                 }
 
-                DifyClient.DifyChatResult result = difyClient.chatMessages(payload.toString());
+                log.info("monitorChatStream 调用Dify前 traceId={} queryLength={} hasConversationId={} hasImage={}",
+                        streamTraceId,
+                        request.message().length(),
+                        StringUtils.hasText(conversationId),
+                        StringUtils.hasText(request.imageDataUrl()));
+                DifyClient.DifyChatResult result = waitForChatResultWithHeartbeat(
+                        emitter, payload, principal.subjectId(), request.imageDataUrl(), true, streamTraceId);
                 String answer = normalizeStreamingAnswer(result.answer());
-                if (StringUtils.hasText(result.conversationId())) {
-                    mappingService.recordConversation(principal.subjectId(), result.conversationId());
-                    if (StringUtils.hasText(request.wechatContact())) {
-                        contactConversationMappingService.upsertConversationId(
-                                principal.subjectId(), request.roleId(), request.wechatContact(), result.conversationId());
-                    }
+                log.info("monitorChatStream 调用Dify后 traceId={} conversationId={} answerLength={}",
+                        streamTraceId,
+                        result.conversationId(),
+                        answer == null ? 0 : answer.length());
+                if (StringUtils.hasText(result.conversationId()) && StringUtils.hasText(request.wechatContact())) {
+                    contactConversationMappingService.upsertConversationId(
+                            principal.subjectId(), request.roleId(), request.wechatContact(), result.conversationId());
                 }
                 if (StringUtils.hasText(answer)) {
                     sessionHistoryService.appendMessage(
                             principal.subjectId(), request.roleId(), sceneType, sessionKey, "AI", answer);
                     boolean deductSuccess = membershipEntitlementService.deductPoints(principal.subjectId(), 1, "chat_reply", result.conversationId());
                     if (!deductSuccess) {
+                        log.warn("monitorChatStream 扣点失败 traceId={} userId={}", streamTraceId, principal.subjectId());
                         emitter.send(SseEmitter.event().data(new StepMsg("LOGIC", "积分不足，无法完成本次回复。请前往“我的”页面充值或升级会员。")));
                         emitter.complete();
                         return;
                     }
                 }
                 emitter.send(SseEmitter.event().data(new StepMsg("OUTPUT", answer)));
+                log.info("monitorChatStream 完成 traceId={}", streamTraceId);
                 emitter.complete();
             } catch (Exception e) {
-                log.error("Monitor chat stream error", e);
+                log.error("Monitor chat stream error traceId={}", streamTraceId, e);
                 emitter.completeWithError(e);
             } finally {
                 TenantContext.clear();
@@ -424,26 +425,6 @@ public class UserDifyController {
         return (TransitPrincipal) authentication.getPrincipal();
     }
 
-    private String adjustChatRequest(TransitPrincipal principal, String requestJson) throws IOException {
-        JsonNode node = objectMapper.readTree(requestJson);
-        if (!(node instanceof ObjectNode obj)) {
-            return requestJson;
-        }
-        if (!obj.hasNonNull("user")) {
-            obj.put("user", "user-" + principal.subjectId());
-        }
-        if (!obj.hasNonNull("response_mode")) {
-            obj.put("response_mode", "streaming");
-        }
-        if (!obj.hasNonNull("conversation_id")) {
-            String latest = mappingService.getLatestConversationId(principal.subjectId());
-            if (StringUtils.hasText(latest)) {
-                obj.put("conversation_id", latest);
-            }
-        }
-        return objectMapper.writeValueAsString(obj);
-    }
-
     private boolean isInvalidConversation(TransitException ex) {
         String message = ex.getMessage();
         if (message == null) {
@@ -451,28 +432,6 @@ public class UserDifyController {
         }
         String lower = message.toLowerCase();
         return lower.contains("conversation not exists") || lower.contains("conversation not exist") || lower.contains("conversation not found");
-    }
-
-    private boolean hasConversationId(String requestJson) {
-        try {
-            JsonNode node = objectMapper.readTree(requestJson);
-            return node.hasNonNull("conversation_id");
-        } catch (Exception ex) {
-            return false;
-        }
-    }
-
-    private String stripConversationId(String requestJson) {
-        try {
-            JsonNode node = objectMapper.readTree(requestJson);
-            if (node instanceof ObjectNode obj) {
-                obj.remove("conversation_id");
-                return objectMapper.writeValueAsString(obj);
-            }
-            return requestJson;
-        } catch (Exception ex) {
-            return requestJson;
-        }
     }
 
     private List<String> retrieveFromDatasets(List<String> datasetIds, String query) {
@@ -719,12 +678,254 @@ public class UserDifyController {
         return text;
     }
 
+    private DifyClient.DifyChatResult executeChatWithImageFallback(
+            ObjectNode payload, Long userId, String imageDataUrl, boolean allowConversationFallback, String traceId) {
+        ImagePayload imagePayload = parseImagePayload(imageDataUrl);
+        String responseMode = payload.path("response_mode").asText("");
+        boolean preferLocalFileFirst = imagePayload != null && "streaming".equalsIgnoreCase(responseMode);
+        int attempt = 0;
+        if (imagePayload != null) {
+            log.info("图片消息开始调用 Dify traceId={} userId={} mimeType={} byteSize={} base64Length={} responseMode={} preferLocalFileFirst={} hasConversationId={}",
+                    traceId,
+                    userId,
+                    imagePayload.mimeType(),
+                    imagePayload.bytes().length,
+                    imagePayload.base64Data().length(),
+                    responseMode,
+                    preferLocalFileFirst,
+                    payload.hasNonNull("conversation_id"));
+            if (preferLocalFileFirst) {
+                attachLocalFile(payload, userId, imagePayload, traceId);
+                log.info("图片消息使用 local_file 首次尝试 traceId={} reason=chatflow_streaming", traceId);
+            } else {
+                attachBase64File(payload, imagePayload);
+                log.info("图片消息使用 base64 首次尝试 traceId={}", traceId);
+            }
+        }
+
+        boolean switchedToLocalFile = preferLocalFileFirst;
+        boolean strippedConversationId = false;
+        while (true) {
+            attempt++;
+            log.info("图片消息调用 Dify 尝试 traceId={} attempt={} transferMethod={} hasConversationId={} strippedConversationId={}",
+                    traceId,
+                    attempt,
+                    resolveTransferMethod(payload),
+                    payload.hasNonNull("conversation_id"),
+                    strippedConversationId);
+            try {
+                DifyClient.DifyChatResult result = difyClient.chatMessages(payload.toString());
+                if (imagePayload != null) {
+                    log.info("图片消息调用 Dify 成功 traceId={} attempt={} transferMethod={} conversationId={} answerLength={}",
+                            traceId,
+                            attempt,
+                            resolveTransferMethod(payload),
+                            result.conversationId(),
+                            result.answer() == null ? 0 : result.answer().length());
+                }
+                return result;
+            } catch (TransitException ex) {
+                log.warn("图片消息调用 Dify 捕获 TransitException traceId={} attempt={} transferMethod={} errorCode={} msg={}",
+                        traceId,
+                        attempt,
+                        resolveTransferMethod(payload),
+                        ex.getErrorCode(),
+                        ex.getMessage(),
+                        ex);
+                if (!switchedToLocalFile && imagePayload != null && isBase64TransferUnsupported(ex)) {
+                    log.warn("Dify base64 图片调用失败，准备切换 local_file traceId={} msg={}", traceId, ex.getMessage());
+                    try {
+                        attachLocalFile(payload, userId, imagePayload, traceId);
+                    } catch (TransitException uploadEx) {
+                        log.error("图片上传到 Dify 失败 traceId={} msg={}", traceId, uploadEx.getMessage(), uploadEx);
+                        throw new TransitException(ErrorCode.BAD_REQUEST,
+                                "图片已识别，但上传到 Dify 失败：" + uploadEx.getMessage(), uploadEx);
+                    }
+                    switchedToLocalFile = true;
+                    continue;
+                }
+                if (allowConversationFallback && !strippedConversationId && isInvalidConversation(ex) && payload.hasNonNull("conversation_id")) {
+                    log.warn("Dify 会话ID无效，移除 conversation_id 后重试 traceId={} conversationId={} msg={}",
+                            traceId,
+                            payload.path("conversation_id").asText(),
+                            ex.getMessage());
+                    payload.remove("conversation_id");
+                    strippedConversationId = true;
+                    continue;
+                }
+                if (imagePayload != null) {
+                    log.error("图片消息调用 Dify 最终失败 traceId={} switchedToLocalFile={} strippedConversationId={} msg={}",
+                            traceId,
+                            switchedToLocalFile,
+                            strippedConversationId,
+                            ex.getMessage(),
+                            ex);
+                    throw new TransitException(ErrorCode.BAD_REQUEST,
+                            "图片已识别，但 Dify 图片处理失败：" + ex.getMessage(), ex);
+                }
+                throw ex;
+            } catch (Exception ex) {
+                log.error("图片消息调用 Dify 捕获运行异常 traceId={} attempt={} transferMethod={} exType={} msg={}",
+                        traceId,
+                        attempt,
+                        resolveTransferMethod(payload),
+                        ex.getClass().getName(),
+                        ex.getMessage(),
+                        ex);
+                if (imagePayload != null) {
+                    log.error("图片消息调用 Dify 最终失败 traceId={} switchedToLocalFile={} strippedConversationId={} exType={} msg={}",
+                            traceId,
+                            switchedToLocalFile,
+                            strippedConversationId,
+                            ex.getClass().getName(),
+                            ex.getMessage(),
+                            ex);
+                    throw new TransitException(ErrorCode.BAD_REQUEST,
+                            "图片已识别，但 Dify 图片处理失败：" + ex.getMessage(), ex);
+                }
+                throw new TransitException(ErrorCode.INTERNAL_ERROR, "Dify 对话调用失败", ex);
+            }
+        }
+    }
+
+    private DifyClient.DifyChatResult waitForChatResultWithHeartbeat(
+            SseEmitter emitter, ObjectNode payload, Long userId, String imageDataUrl, boolean allowConversationFallback, String traceId)
+            throws Exception {
+        CompletableFuture<DifyClient.DifyChatResult> future = CompletableFuture.supplyAsync(
+                () -> executeChatWithImageFallback(payload, userId, imageDataUrl, allowConversationFallback, traceId));
+        long startedAt = System.currentTimeMillis();
+        int heartbeatCount = 0;
+        while (true) {
+            try {
+                return future.get(DIFY_WAIT_HEARTBEAT_MS, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException ex) {
+                heartbeatCount++;
+                long elapsedMs = System.currentTimeMillis() - startedAt;
+                String waitingMessage = buildWaitingMessage(imageDataUrl, heartbeatCount, elapsedMs);
+                log.info("monitorChatStream 等待 Dify 响应中 traceId={} heartbeatCount={} elapsedMs={} transferMethod={}",
+                        traceId,
+                        heartbeatCount,
+                        elapsedMs,
+                        resolveTransferMethod(payload));
+                emitter.send(SseEmitter.event().data(new StepMsg("LOGIC", waitingMessage)));
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                throw new TransitException(ErrorCode.INTERNAL_ERROR, "等待 Dify 响应被中断", ex);
+            } catch (ExecutionException ex) {
+                Throwable cause = ex.getCause();
+                if (cause instanceof Exception exception) {
+                    throw exception;
+                }
+                throw new TransitException(ErrorCode.INTERNAL_ERROR, "Dify 对话调用失败", ex);
+            }
+        }
+    }
+
+    private String buildWaitingMessage(String imageDataUrl, int heartbeatCount, long elapsedMs) {
+        long elapsedSeconds = Math.max(1L, elapsedMs / 1000L);
+        if (StringUtils.hasText(imageDataUrl)) {
+            return "图片已提交给 Dify 分析，正在等待模型返回结果，已等待 " + elapsedSeconds + " 秒（第 " + heartbeatCount + " 次心跳）。";
+        }
+        return "正在等待 Dify 返回结果，已等待 " + elapsedSeconds + " 秒（第 " + heartbeatCount + " 次心跳）。";
+    }
+
+    private String resolveTransferMethod(ObjectNode payload) {
+        JsonNode filesNode = payload.path("files");
+        if (!filesNode.isArray() || filesNode.isEmpty()) {
+            return "none";
+        }
+        JsonNode fileNode = filesNode.get(0);
+        String transferMethod = fileNode.path("transfer_method").asText("");
+        return StringUtils.hasText(transferMethod) ? transferMethod : "unknown";
+    }
+
+    private ImagePayload parseImagePayload(String imageDataUrl) {
+        if (!StringUtils.hasText(imageDataUrl)) {
+            return null;
+        }
+        Matcher matcher = IMAGE_DATA_URL_PATTERN.matcher(imageDataUrl.trim());
+        if (!matcher.matches()) {
+            throw new TransitException(ErrorCode.BAD_REQUEST, "图片格式不合法，需为 data:image/*;base64,...");
+        }
+        String mimeType = matcher.group(1).toLowerCase(Locale.ROOT);
+        String base64Data = matcher.group(2).replaceAll("\\s+", "");
+        byte[] bytes;
+        try {
+            bytes = Base64.getDecoder().decode(base64Data);
+        } catch (IllegalArgumentException ex) {
+            throw new TransitException(ErrorCode.BAD_REQUEST, "图片Base64解码失败", ex);
+        }
+        if (bytes.length == 0) {
+            throw new TransitException(ErrorCode.BAD_REQUEST, "图片内容为空");
+        }
+        if (bytes.length > MAX_IMAGE_BYTES) {
+            throw new TransitException(ErrorCode.BAD_REQUEST, "图片体积超过10MB限制");
+        }
+        String suffix = switch (mimeType) {
+            case "image/jpeg", "image/jpg" -> ".jpg";
+            case "image/png" -> ".png";
+            case "image/gif" -> ".gif";
+            default -> ".img";
+        };
+        String fileName = "wechat-image-" + System.currentTimeMillis() + suffix;
+        return new ImagePayload(mimeType, base64Data, bytes, fileName);
+    }
+
+    private void attachBase64File(ObjectNode payload, ImagePayload imagePayload) {
+        ArrayNode files = objectMapper.createArrayNode();
+        ObjectNode fileNode = files.addObject();
+        fileNode.put("type", "image");
+        fileNode.put("transfer_method", "base64");
+        fileNode.put("mime_type", imagePayload.mimeType());
+        fileNode.put("data", imagePayload.base64Data());
+        payload.set("files", files);
+    }
+
+    private void attachLocalFile(ObjectNode payload, Long userId, ImagePayload imagePayload, String traceId) {
+        String uploadFileId = difyClient.uploadChatFile(
+                "user-" + userId, imagePayload.fileName(), imagePayload.mimeType(), imagePayload.bytes());
+        log.info("图片已上传到 Dify traceId={} uploadFileId={} fileName={} mimeType={} byteSize={}",
+                traceId,
+                uploadFileId,
+                imagePayload.fileName(),
+                imagePayload.mimeType(),
+                imagePayload.bytes().length);
+        ArrayNode files = objectMapper.createArrayNode();
+        ObjectNode fileNode = files.addObject();
+        fileNode.put("type", "image");
+        fileNode.put("transfer_method", "local_file");
+        fileNode.put("upload_file_id", uploadFileId);
+        payload.set("files", files);
+    }
+
+    private boolean isBase64TransferUnsupported(TransitException ex) {
+        String message = ex.getMessage();
+        if (!StringUtils.hasText(message)) {
+            return false;
+        }
+        String lower = message.toLowerCase(Locale.ROOT);
+        return lower.contains("transfer_method")
+                || lower.contains("invalid_param")
+                || lower.contains("base64")
+                || lower.contains("not support");
+    }
+
     public record UploadKnowledgeBaseDocumentResponse(String knowledgeBaseId, String difyDatasetId, String difyDocumentId) {
     }
 
-    public record MonitorChatRequest(Long roleId, String message, String role, String conversationId, String wechatContact, String roomType) {
+    public record MonitorChatRequest(
+            Long roleId,
+            String message,
+            String role,
+            String conversationId,
+            String wechatContact,
+            String roomType,
+            String imageDataUrl) {
     }
 
     public record StepMsg(String step, String content) {
+    }
+
+    private record ImagePayload(String mimeType, String base64Data, byte[] bytes, String fileName) {
     }
 }
